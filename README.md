@@ -18,6 +18,84 @@ directly. MCP is the Gateway's built-in endpoint, not a separate bridge.
 It was built for [Wayzyy](https://wayzyy.com)'s content engine. **You do not need that
 pipeline to run this repo:** without it the receiver runs in *demo mode* on bundled sample data.
 
+> New to Graftcode? Watch the [three-minute Graftcode introduction](https://youtu.be/8MKrom45RUA)
+> for context, then come back here to see it applied to a real project.
+> Disclosure: this project is part of the Graftcode Impact Programme.
+
+## What Graftcode does here
+
+The Python service is a plain class with public methods. Graftcode turns those methods into
+everything the clients need:
+
+1. **The Gateway hosts the Python service.** `gg` loads `ArticlePipelineService` and serves its
+   public methods on `:8080` (WebSocket). No web framework wraps it.
+2. **It generates the Graft.** The React dashboard and the Node script install the generated
+   package and call `getDraft(...)`, `writeArticle(...)` and the rest as ordinary typed-looking
+   function calls.
+3. **The same methods are exposed over MCP.** The Gateway's built-in `/mcp` endpoint lists every
+   public method as a tool, so Claude or Cursor can use the pipeline without a second adapter.
+
+**What this saved me from writing and maintaining:** FastAPI routes, Pydantic request/response
+DTOs, a hand-written `fetch` client in TypeScript, and a separate FastMCP bridge (the old one is
+kept in [`legacy/`](legacy/) for comparison). Calling the backend's public methods directly
+means there is no integration layer to generate, review or keep in sync, which also means
+less code for an AI assistant to produce and re-read on every change, and fewer tokens spent.
+
+Graftcode's own docs: <https://docs.graftcode.com/quick-start>
+
+## How the pieces fit together
+
+The repository has one Python service and several ways to use it. The dashboard and Node
+client use the generated Graft over WebSocket; MCP-compatible clients use the Gateway's
+built-in HTTP endpoint. They all reach the same public Python methods.
+
+```mermaid
+flowchart LR
+    A[React dashboard] -->|generated Graft<br/>WebSocket :8080| G[Graftcode Gateway]
+    B[Node.js client] -->|generated Graft<br/>WebSocket :8080| G
+    C[Claude / Cursor] -->|MCP over HTTP<br/>/mcp :8081| G
+    G --> S[ArticlePipelineService<br/>plain Python methods]
+    S --> D[(Topics and drafts)]
+    S --> P[Optional real pipeline<br/>research, writing, publishing]
+```
+
+The important boundary is the Python service. The UI, scripts, and AI assistants are clients
+of the same service rather than separate copies of the content logic.
+
+## The content workflow
+
+The demo models an editorial workflow from an idea to a reviewable change. Sources and rules
+inform the draft, while the human review step remains the publishing gate.
+
+```mermaid
+flowchart LR
+    I[Topic queue] --> R[RSS and web research]
+    I --> K[Keyword research]
+    R --> O[Outline]
+    K --> O
+    B[Existing blog] --> L[Style and rulebook]
+    L --> O
+    O --> W[Write draft]
+    W --> E[SEO and style checks]
+    E --> H{Human review}
+    H -->|needs changes| W
+    H -->|approved| PR[Stage GitHub PR]
+    H -->|approved| X[Optional publisher]
+```
+
+The bundled receiver runs this flow in demo mode with sample data. Attaching the real article
+pipeline replaces the sample sources and placeholder writer with the project's live research,
+LLM, and publishing integrations.
+
+## Video walkthrough
+
+A long-format walkthrough of the project is coming and will be linked here. It covers the
+dashboard, the Graft calls and the MCP endpoint end to end.
+
+For a quick visual tour, start with the dashboard, open the Topic Queue, generate or open a
+draft, run the style check, and inspect the Architecture tab. The Architecture tab shows the
+available MCP tools and compares local calls through the generated Graft and MCP endpoint.
+
 ## What is real and what is demo
 
 | Method | With the real pipeline attached | Demo mode (default for new users) |
@@ -152,6 +230,30 @@ come back as JSON text. The earlier hand-written FastMCP bridge is kept in `lega
 - **MCP is built in:** `bash scripts/mcp-check.sh` lists the Gateway's tools with no extra process running.
 - **Latency:** open the dashboard's Architecture tab and press *Run 20 calls each*. It times the same
   method through the Graft and through MCP on your machine. The numbers are local round trips only.
+
+## Suggested screenshots for the README
+
+Screenshots are optional, but these four make the project much easier to evaluate:
+
+1. **Pipeline overview:** the dashboard showing Topic Queue, research, drafting, review, and
+   GitHub staging as the main path.
+2. **Draft Studio:** a generated draft beside its style-check result, including the score,
+   passed rules, and any fixes still required.
+3. **Architecture:** the Architecture tab showing the Gateway, MCP tool count, and the local
+   Graft-versus-MCP comparison.
+4. **GitHub staging:** the result after `pushToGithub`, with the branch and pull-request URL
+   visible. Use a test repository and redact tokens, private URLs, and customer content.
+
+Place them in `docs/images/` and embed them next to the relevant section, for example:
+
+```md
+![Pipeline Studio overview](docs/images/pipeline-overview.png)
+```
+
+The most valuable first screenshot is the pipeline overview. It communicates the product in a
+few seconds; the architecture and GitHub screenshots then prove how the integration works.
+
+For the expanded diagrams and demo notes, see the [architecture guide](docs/architecture.md).
 
 ## Layout
 
