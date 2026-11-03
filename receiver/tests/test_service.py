@@ -109,3 +109,21 @@ def test_source_with_empty_url_is_still_listed(service, tmp_path):
     )
     sources = json.loads(service.get_topic_sources("Empty url topic"))
     assert sources == [{"platform": "research", "title": "Mentioned while researching X", "url": ""}]
+
+
+def test_find_similar_articles_falls_back_to_keywords(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    results = json.loads(service.find_similar_articles("cafe guide in Assagao"))
+    assert results[0]["filename"].endswith("assagao-cafe-guide.md")
+    assert results[0]["engine"] == "keyword-overlap"
+
+
+def test_find_similar_articles_survives_unreachable_sie(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "http://127.0.0.1:9")
+    results = json.loads(service.find_similar_articles("assagao cafe"))
+    assert results and results[0]["engine"] == "keyword-overlap"
+
+
+def test_find_similar_articles_rejects_empty_query(service):
+    with pytest.raises(ValueError):
+        service.find_similar_articles("  ")

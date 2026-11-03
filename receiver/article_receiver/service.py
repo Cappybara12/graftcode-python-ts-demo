@@ -234,6 +234,14 @@ class ArticleSuggestion:
 
 
 @dataclass
+class SimilarArticle:
+    filename: str
+    title: str
+    score: float
+    engine: str
+
+
+@dataclass
 class PullRequestResult:
     status: str
     branch: str
@@ -244,6 +252,31 @@ class PullRequestResult:
     pr_url: str
     files_modified: list[str]
     message: str
+
+
+SIE_URL = os.environ.get("SIE_URL", "")
+SIE_MODEL = os.environ.get("SIE_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
+
+def _tokens(text: str) -> set:
+    return set(re.findall(r"[a-z0-9]{3,}", text.lower()))
+
+
+def _cosine(a, b) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm = (sum(x * x for x in a) ** 0.5) * (sum(y * y for y in b) ** 0.5)
+    return dot / norm if norm else 0.0
+
+
+def _embed_with_sie(texts: list) -> list:
+    """Embed texts through a self-hosted Superlinked SIE server (optional)."""
+    from sie_sdk import SIEClient
+    from sie_sdk.types import Item
+
+    # Fail fast when the server is down; allow time for a model's first-call download.
+    client = SIEClient(SIE_URL, connect_timeout_s=3, timeout_s=120)
+    results = client.encode(SIE_MODEL, [Item(text=t) for t in texts], wait_for_capacity=False)
+    return [[float(v) for v in r["dense"]] for r in results]
 
 
 def _to_json(result) -> str:
@@ -696,6 +729,47 @@ class ArticlePipelineService:
             matched_signals=matched,
             sources_count=t["sources_count"],
         ))
+
+    def find_similar_articles(self, query: str, limit: int = 3) -> str:
+        """
+        Finds existing drafts closest in meaning to a topic or question, so a new
+        article can reuse the blog's own wording and avoid duplicates.
+
+        Uses embeddings from a self-hosted Superlinked SIE server when SIE_URL is set
+        and reachable; otherwise falls back to keyword overlap (no extra service needed).
+        """
+        if not query.strip():
+            raise ValueError("query must not be empty")
+        files = sorted(DRAFTS_DIR.glob("*.md")) if DRAFTS_DIR.exists() else []
+        texts = [f.read_text(encoding="utf-8", errors="ignore") for f in files]
+        if not files:
+            return json.dumps([])
+
+        engine, scores = "keyword-overlap", None
+        if SIE_URL:
+            try:
+                vectors = _embed_with_sie([query] + texts)
+                scores = [_cosine(vectors[0], v) for v in vectors[1:]]
+                engine = f"sie:{SIE_MODEL}"
+            except Exception:
+                scores = None  # SIE missing or unreachable: use the fallback
+        if scores is None:
+            q = _tokens(query)
+            scores = [len(q & _tokens(t)) / (len(q) or 1) for t in texts]
+
+        ranked = sorted(zip(files, texts, scores), key=lambda x: x[2], reverse=True)[: max(1, int(limit))]
+        results = []
+        for f, text, score in ranked:
+            title = f.stem.replace("-", " ").title()
+            for line in text.splitlines()[:5]:
+                if line.startswith("title:"):
+                    title = line.replace("title:", "").strip().strip('"').strip("'")
+                    break
+                if line.startswith("# "):
+                    title = line[2:].strip()
+                    break
+            results.append(SimilarArticle(filename=f.name, title=title, score=round(score, 3), engine=engine))
+        return _to_json(results)
 
     def push_to_github(self, filename: str) -> str:
         """

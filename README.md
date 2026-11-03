@@ -185,6 +185,22 @@ WAYZYY_WRITER_DIR=/nonexistent WAYZYY_SCANNER_DIR=/nonexistent bash scripts/star
 What the config does **not** cover: the real article pipeline's prompts and brand voice. Those
 live in the separate pipeline project you attach with `WAYZYY_WRITER_DIR`.
 
+## Optional: semantic search with Superlinked SIE
+
+`find_similar_articles(query, limit)` returns the existing drafts closest in meaning to a topic.
+By default it uses keyword overlap and needs nothing extra. To use embeddings, run a local
+[Superlinked SIE](https://github.com/superlinked/sie) server (needs Python 3.12) and point the
+receiver at it:
+
+```bash
+pip install "sie-server[local]" && sie-server serve --port 8090
+SIE_URL=http://localhost:8090 bash scripts/start.sh
+```
+
+`SIE_MODEL` picks the embedding model (default `sentence-transformers/all-MiniLM-L6-v2`). If SIE is
+unreachable the method falls back to keywords, and each result says which `engine` produced it.
+Like every public method, it is also exposed through the Graft and MCP.
+
 ## Attach the real pipeline (optional)
 
 Copy `.env.example` and export the variables you need, for example `WAYZYY_WRITER_DIR`,
