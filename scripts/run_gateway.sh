@@ -40,7 +40,7 @@ allowCredentials=false
 CORS
 
 # The receiver reads its configuration with PyYAML.
-python3 -c "import yaml" 2>/dev/null || { echo "PyYAML is required: pip install -r receiver/requirements.txt"; exit 1; }
+"${PYTHONHOME:+$PYTHONHOME/bin/}python3" -c "import yaml" 2>/dev/null || { echo "PyYAML is required: pip install -r receiver/requirements.txt"; exit 1; }
 
 # Niche configuration (brand, categories, suggestion keywords, style rules).
 # Defaults to the bundled Wayzyy config; point PIPELINE_CONFIG at your own YAML to retarget it.
