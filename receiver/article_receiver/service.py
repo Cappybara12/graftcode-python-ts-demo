@@ -738,8 +738,9 @@ class ArticlePipelineService:
         Uses embeddings from a self-hosted Superlinked SIE server when SIE_URL is set
         and reachable; otherwise falls back to keyword overlap (no extra service needed).
         """
-        if not query.strip():
+        if not (query or "").strip():
             raise ValueError("query must not be empty")
+        limit = int(limit) if limit else 3  # Graftcode does not apply Python default args
         files = sorted(DRAFTS_DIR.glob("*.md")) if DRAFTS_DIR.exists() else []
         texts = [f.read_text(encoding="utf-8", errors="ignore") for f in files]
         if not files:
@@ -757,7 +758,7 @@ class ArticlePipelineService:
             q = _tokens(query)
             scores = [len(q & _tokens(t)) / (len(q) or 1) for t in texts]
 
-        ranked = sorted(zip(files, texts, scores), key=lambda x: x[2], reverse=True)[: max(1, int(limit))]
+        ranked = sorted(zip(files, texts, scores), key=lambda x: x[2], reverse=True)[: max(1, limit)]
         results = []
         for f, text, score in ranked:
             title = f.stem.replace("-", " ").title()

@@ -127,3 +127,8 @@ def test_find_similar_articles_survives_unreachable_sie(service, monkeypatch):
 def test_find_similar_articles_rejects_empty_query(service):
     with pytest.raises(ValueError):
         service.find_similar_articles("  ")
+
+
+def test_find_similar_articles_defaults_a_missing_limit(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    assert json.loads(service.find_similar_articles("assagao cafe", None))
