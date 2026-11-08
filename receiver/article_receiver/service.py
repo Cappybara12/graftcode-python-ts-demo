@@ -1,4 +1,5 @@
 import glob as _glob
+import hashlib
 import os
 import sys
 import re
@@ -295,6 +296,16 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
+def _title_from_filename(stem: str) -> str:
+    """Readable title from a queue filename such as 2026-01-05_quiet-beaches."""
+    return re.sub(r"^\d{4}-\d{2}-\d{2}_?", "", stem).replace("-", " ").replace("_", " ").strip().title()
+
+
+def _strip_front_matter(text: str) -> str:
+    match = re.match(r"^---\n.*?\n---\n?", text, re.DOTALL)
+    return text[match.end():] if match else text
+
+
 def _validated_name(filename) -> str:
     """Accept only a plain file name: no directories, no absolute paths, no traversal."""
     if not isinstance(filename, str) or not filename.strip():
@@ -314,23 +325,32 @@ def _inside_drafts(path: Path) -> Path:
     return resolved
 
 
-def _find_draft(filename: str) -> Path:
-    """Resolve an existing draft by exact name, falling back to a fuzzy name match.
+def _find_draft(filename: str, exact_only: bool = False) -> Path:
+    """Resolve an existing draft by exact name, falling back to a partial name match.
 
-    Every candidate is checked after symlink resolution, so neither a crafted name nor a
-    symlink planted in the drafts folder can reach a file outside it.
+    A partial name must match exactly one draft, so a vague name never picks an arbitrary
+    file. Every candidate is checked after symlink resolution, so neither a crafted name
+    nor a symlink planted in the drafts folder can reach a file outside it.
     """
     name = _validated_name(filename)
     exact = DRAFTS_DIR / name
     if exact.is_file():
         return _inside_drafts(exact)
+    if exact_only:
+        raise ValueError(f"Draft '{filename}' not found (an exact file name is required).")
+    matches = []
     for match in sorted(DRAFTS_DIR.glob(f"*{_glob.escape(name)}*")):
         if not match.is_file():
             continue
         try:
-            return _inside_drafts(match)
+            matches.append(_inside_drafts(match))
         except ValueError:
             continue  # a symlink pointing outside is never a match
+    if len(matches) > 1:
+        names = ", ".join(m.name for m in matches[:5])
+        raise ValueError(f"Draft name '{filename}' is ambiguous; it matches: {names}")
+    if matches:
+        return matches[0]
     raise ValueError(f"Draft '{filename}' not found.")
 
 
@@ -340,6 +360,20 @@ def _draft_write_path(filename: str) -> Path:
     if not name.lower().endswith(".md"):
         raise ValueError("Draft filenames must end in .md.")
     return _inside_drafts(DRAFTS_DIR / name)
+
+
+def _new_draft_path(topic: str) -> Path:
+    """A fresh draft path for a topic. Never reuses an existing file, so edits are not overwritten.
+
+    Topics with no Latin letters or digits (for example Hindi) get a short hash instead of
+    an empty slug, so different topics do not collide.
+    """
+    slug = _slug(topic) or "topic-" + hashlib.sha1(topic.encode("utf-8")).hexdigest()[:8]
+    base = f"{datetime.now().strftime('%Y-%m-%d')}_{slug}"
+    path, n = _draft_write_path(f"{base}.md"), 2
+    while path.exists():
+        path, n = _draft_write_path(f"{base}-{n}.md"), n + 1
+    return path
 
 
 class ArticlePipelineService:
@@ -405,7 +439,7 @@ class ArticlePipelineService:
             for f in sorted(REVIEW_DIR.glob("*.md"), reverse=True):
                 try:
                     content = f.read_text(encoding="utf-8", errors="ignore")
-                    title = f.stem.replace("2026-", "").replace("2025-", "").replace("-", " ").title()
+                    title = _title_from_filename(f.stem)
                     # extract sources count
                     sources_count = len(re.findall(r"^- \[([^\]]+)\]", content, re.MULTILINE))
                     keyword = re.search(r"^keyword:\s*(.+)$", content, re.MULTILINE)
@@ -435,6 +469,8 @@ class ArticlePipelineService:
         """
         Retrieves verified sources, headlines, and platform URLs for a specific topic.
         """
+        if not (topic or "").strip():
+            raise ValueError("Topic cannot be empty.")
         sources = []
         if REVIEW_DIR.exists():
             for fname in REVIEW_DIR.glob("*.md"):
@@ -479,11 +515,9 @@ class ArticlePipelineService:
         style_result = check_article(article_content)
         article_content = style_result["article"]
 
-        slug = re.sub(r"[^a-z0-9]+", "-", clean_topic.lower()).strip("-")
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        filename = f"{date_str}_{slug}.md"
         DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
-        target_path = _draft_write_path(filename)
+        target_path = _new_draft_path(clean_topic)
+        filename = target_path.name
         target_path.write_text(article_content, encoding="utf-8")
 
         return _to_json(ArticleResult(
@@ -498,8 +532,6 @@ class ArticlePipelineService:
 
     def _write_demo_article(self, topic: str) -> str:
         """Demo mode: write a clearly-labelled placeholder draft (no LLM, no API keys)."""
-        slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")
-        filename = f"{datetime.now().strftime('%Y-%m-%d')}_{slug}.md"
         DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
         body = (
             f"# {topic}\n\n"
@@ -507,11 +539,11 @@ class ArticlePipelineService:
             "(set WAYZYY_WRITER_DIR) to generate a researched article.\n\n"
             f"This draft was created by `write_article(\"{topic}\")` over Graftcode.\n"
         )
-        target_path = _draft_write_path(filename)
+        target_path = _new_draft_path(topic)
         target_path.write_text(body, encoding="utf-8")
         return _to_json(ArticleResult(
             status="completed (demo)",
-            filename=filename,
+            filename=target_path.name,
             title=topic,
             word_count=len(body.split()),
             saved_to=str(target_path),
@@ -591,7 +623,8 @@ class ArticlePipelineService:
         # Check passive voice occurrences
         passive_matches = len(re.findall(r"\b(is|are|was|were|been)\s+\w+ed\b", text))
 
-        first_line = next((l for l in text.splitlines() if l.strip() and not l.startswith(("#", "---", ">"))), "")
+        body = _strip_front_matter(text)
+        first_line = next((l for l in body.splitlines() if l.strip() and not l.startswith(("#", ">"))), "")
         passed_checks = []
         if not first_line.startswith(tuple(o.lower() for o in style["banned_openers"])):
             passed_checks.append("No banned generic opener")
@@ -719,7 +752,8 @@ class ArticlePipelineService:
         if not site_dir:
             raise RuntimeError("WAYZYY_SITE_DIR is not set. Point it at your local checkout of the site repo.")
 
-        file_path = _find_draft(filename)
+        # Publishing is irreversible, so it needs the exact draft file name.
+        file_path = _find_draft(filename, exact_only=True)
 
         result = publish_draft(str(file_path), dry_run=False)
         branch_name = f"add-blog-{result['slug']}"
