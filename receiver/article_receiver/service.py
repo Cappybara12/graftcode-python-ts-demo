@@ -4,6 +4,7 @@ import sys
 import re
 import json
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -277,6 +278,22 @@ def _embed_with_sie(texts: list) -> list:
     client = SIEClient(SIE_URL, connect_timeout_s=3, timeout_s=120)
     results = client.encode(SIE_MODEL, [Item(text=t) for t in texts], wait_for_capacity=False)
     return [[float(v) for v in r["dense"]] for r in results]
+
+
+# Draft embeddings keyed by (model, path, mtime, size): only new or edited drafts are re-embedded.
+_EMBED_CACHE: dict = {}
+
+
+def _embed_drafts_and_query(query: str, files: list, texts: list) -> tuple:
+    keys = []
+    for f in files:
+        st = f.stat()
+        keys.append((SIE_MODEL, str(f), st.st_mtime_ns, st.st_size))
+    missing = [i for i, k in enumerate(keys) if k not in _EMBED_CACHE]
+    vectors = _embed_with_sie([query] + [texts[i] for i in missing])
+    for i, v in zip(missing, vectors[1:]):
+        _EMBED_CACHE[keys[i]] = v
+    return vectors[0], [_EMBED_CACHE[k] for k in keys]
 
 
 def _to_json(result) -> str:
@@ -738,25 +755,65 @@ class ArticlePipelineService:
         Uses embeddings from a self-hosted Superlinked SIE server when SIE_URL is set
         and reachable; otherwise falls back to keyword overlap (no extra service needed).
         """
+        limit = self._check_similar_args(query, limit)
+        files, texts = self._draft_corpus()
+        results, _, _ = self._rank_similar(query, limit, files, texts, use_sie=True)
+        return _to_json(results)
+
+    def compare_search_engines(self, query: str, limit: int = 3) -> str:
+        """
+        Runs the same query through keyword overlap and through Superlinked SIE
+        embeddings, side by side, with the time each engine took. Used by the
+        dashboard to show what semantic search adds over plain keyword matching.
+        """
+        limit = self._check_similar_args(query, limit)
+        files, texts = self._draft_corpus()
+        keyword, k_engine, k_ms = self._rank_similar(query, limit, files, texts, use_sie=False)
+        out = {
+            "query": query,
+            "drafts_searched": len(files),
+            "keyword": {"engine": k_engine, "ms": k_ms, "results": [asdict(r) for r in keyword]},
+            "sie": {"engine": f"sie:{SIE_MODEL}", "ms": 0, "available": False, "results": [], "message": ""},
+        }
+        if not SIE_URL:
+            out["sie"]["message"] = "SIE_URL is not set. Start sie-server and restart with SIE_URL=http://localhost:8090."
+        elif files:
+            semantic, s_engine, s_ms = self._rank_similar(query, limit, files, texts, use_sie=True)
+            if s_engine.startswith("sie:"):
+                out["sie"].update(available=True, ms=s_ms, results=[asdict(r) for r in semantic])
+            else:
+                out["sie"]["message"] = f"SIE server at {SIE_URL} is not reachable."
+        return json.dumps(out)
+
+    @staticmethod
+    def _check_similar_args(query: str, limit) -> int:
         if not (query or "").strip():
             raise ValueError("query must not be empty")
-        limit = int(limit) if limit else 3  # Graftcode does not apply Python default args
-        files = sorted(DRAFTS_DIR.glob("*.md")) if DRAFTS_DIR.exists() else []
-        texts = [f.read_text(encoding="utf-8", errors="ignore") for f in files]
-        if not files:
-            return json.dumps([])
+        return int(limit) if limit else 3  # Graftcode does not apply Python default args
 
+    @staticmethod
+    def _draft_corpus():
+        files = sorted(DRAFTS_DIR.glob("*.md")) if DRAFTS_DIR.exists() else []
+        return files, [f.read_text(encoding="utf-8", errors="ignore") for f in files]
+
+    @staticmethod
+    def _rank_similar(query: str, limit: int, files: list, texts: list, use_sie: bool):
+        """Returns (results, engine used, milliseconds)."""
+        if not files:
+            return [], "keyword-overlap", 0
+        t0 = time.perf_counter()
         engine, scores = "keyword-overlap", None
-        if SIE_URL:
+        if use_sie and SIE_URL:
             try:
-                vectors = _embed_with_sie([query] + texts)
-                scores = [_cosine(vectors[0], v) for v in vectors[1:]]
+                q_vec, doc_vecs = _embed_drafts_and_query(query, files, texts)
+                scores = [_cosine(q_vec, v) for v in doc_vecs]
                 engine = f"sie:{SIE_MODEL}"
             except Exception:
                 scores = None  # SIE missing or unreachable: use the fallback
         if scores is None:
             q = _tokens(query)
             scores = [len(q & _tokens(t)) / (len(q) or 1) for t in texts]
+        ms = round((time.perf_counter() - t0) * 1000)
 
         ranked = sorted(zip(files, texts, scores), key=lambda x: x[2], reverse=True)[: max(1, limit)]
         results = []
@@ -770,7 +827,7 @@ class ArticlePipelineService:
                     title = line[2:].strip()
                     break
             results.append(SimilarArticle(filename=f.name, title=title, score=round(score, 3), engine=engine))
-        return _to_json(results)
+        return results, engine, ms
 
     def push_to_github(self, filename: str) -> str:
         """

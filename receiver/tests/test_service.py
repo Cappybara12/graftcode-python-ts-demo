@@ -132,3 +132,44 @@ def test_find_similar_articles_rejects_empty_query(service):
 def test_find_similar_articles_defaults_a_missing_limit(service, monkeypatch):
     monkeypatch.setattr("article_receiver.service.SIE_URL", "")
     assert json.loads(service.find_similar_articles("assagao cafe", None))
+
+
+def test_compare_search_engines_without_sie(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    out = json.loads(service.compare_search_engines("assagao cafe", 2))
+    assert out["keyword"]["results"][0]["filename"].endswith("assagao-cafe-guide.md")
+    assert len(out["keyword"]["results"]) <= 2
+    assert out["sie"]["available"] is False and "SIE_URL" in out["sie"]["message"]
+
+
+def test_compare_search_engines_reports_unreachable_sie(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "http://127.0.0.1:9")
+    out = json.loads(service.compare_search_engines("assagao cafe", None))
+    assert out["sie"]["available"] is False and "not reachable" in out["sie"]["message"]
+    assert out["keyword"]["results"]
+
+
+def test_compare_search_engines_uses_sie_when_up(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "http://sie")
+    monkeypatch.setattr(
+        "article_receiver.service._embed_with_sie",
+        lambda texts: [[1.0, 0.0]] + [[float(i == 0), float(i != 0)] for i in range(len(texts) - 1)],
+    )
+    out = json.loads(service.compare_search_engines("anything", 1))
+    assert out["sie"]["available"] is True
+    assert out["sie"]["results"][0]["engine"].startswith("sie:")
+
+
+def test_sie_embeds_each_draft_once(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "http://sie")
+    monkeypatch.setattr("article_receiver.service._EMBED_CACHE", {})
+    calls = []
+
+    def fake(texts):
+        calls.append(len(texts))
+        return [[1.0, float(i)] for i in range(len(texts))]
+
+    monkeypatch.setattr("article_receiver.service._embed_with_sie", fake)
+    service.find_similar_articles("first", 2)
+    service.find_similar_articles("second", 2)
+    assert calls[0] > 1 and calls[1] == 1  # second search embeds only the query

@@ -17,10 +17,12 @@ import {
   ChevronRight,
   Scan,
   LightbulbIcon,
+  Search,
 } from 'lucide-react'
 import confetti from 'canvas-confetti'
 import { callGraft, mcpListTools } from './graft'
 import Architecture from './Architecture'
+import SemanticSearch from './SemanticSearch'
 
 interface Topic {
   id: string
@@ -57,12 +59,13 @@ interface RpcLog {
   status: 'ok' | 'err'
 }
 
-type Tab = 'overview' | 'queue' | 'writer' | 'auditor' | 'publisher' | 'architecture'
+type Tab = 'overview' | 'queue' | 'writer' | 'search' | 'auditor' | 'publisher' | 'architecture'
 
 const SIDEBAR_NAV = [
   { id: 'overview',      label: 'Dashboard',       icon: LayoutDashboard },
   { id: 'queue',         label: 'Topic Queue',      icon: Flame },
   { id: 'writer',        label: 'Draft Studio',     icon: BookOpen },
+  { id: 'search',        label: 'Semantic Search',  icon: Search },
   { id: 'auditor',       label: 'Style Auditor',    icon: ShieldCheck },
   { id: 'publisher',     label: 'GitHub Staging',   icon: GitPullRequest },
   { id: 'architecture',  label: 'Architecture',     icon: Code2 },
@@ -104,6 +107,7 @@ export default function App() {
       saveDraft: [body.filename ?? '', body.content ?? ''],
       runStyleCheck: [body.filename ?? ''],
       pushToGithub: [body.filename ?? ''],
+      compareSearchEngines: [body.query ?? '', body.limit ?? 3],
     }
     try {
       const { data } = await callGraft(method, ...(args[method] ?? []))
@@ -781,6 +785,8 @@ export default function App() {
           )}
 
           {/* ══════════ ARCHITECTURE ══════════ */}
+          {tab === 'search' && <SemanticSearch call={callGraftRpc} />}
+
           {tab === 'architecture' && <Architecture statusLabel={status?.status} />}
 
         </div>

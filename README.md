@@ -201,6 +201,11 @@ SIE_URL=http://localhost:8090 bash scripts/start.sh
 unreachable the method falls back to keywords, and each result says which `engine` produced it.
 Like every public method, it is also exposed through the Graft and MCP.
 
+The dashboard's **Semantic Search** tab calls `compare_search_engines(query, limit)` to show keyword
+and SIE results side by side, with the time each took. Draft embeddings are cached, so after the
+first search only the query is embedded. The very first query after starting SIE downloads the
+model and can take about a minute, so run one before a demo.
+
 ## Attach the real pipeline (optional)
 
 Copy `.env.example` and export the variables you need, for example `WAYZYY_WRITER_DIR`,
