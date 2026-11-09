@@ -88,3 +88,11 @@ def test_semantic_thresholds_must_be_numbers(tmp_path):
     bad.write_text("semantic:\n  min_relevance: high\n", encoding="utf-8")
     with pytest.raises(ValueError, match="semantic.min_relevance"):
         _load_config(bad)
+
+
+def test_link_template_needs_slug(tmp_path):
+    from article_receiver.service import _load_config
+    bad = tmp_path / "bad.yaml"
+    bad.write_text('semantic:\n  link_template: "/blog/"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="link_template"):
+        _load_config(bad)

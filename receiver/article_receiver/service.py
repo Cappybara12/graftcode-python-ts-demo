@@ -64,6 +64,15 @@ _DEFAULT_CONFIG = {
         "covered_threshold": 0.75,
         # Points added to a suggestion score per unit of relevance (relevance 0.4 -> +12).
         "relevance_weight": 30,
+        # Related reads link to published posts listed in the site's blogPosts.ts. Empty means
+        # <site_repo_path from the writer's config.yaml>/src/lib/blogPosts.ts.
+        "site_posts_file": "",
+        # A draft's text must be at least this similar to a post's title and description.
+        "link_min_similarity": 0.6,
+        # A draft title at least this similar to another title is flagged as a near-duplicate.
+        "duplicate_threshold": 0.85,
+        # Site URL of a post.
+        "link_template": "/blog/{slug}",
     },
 }
 
@@ -106,9 +115,12 @@ def _load_config(path) -> dict:
     _str_list(config["style"]["banned_words"], "style.banned_words")
     _str_list(config["style"]["banned_openers"], "style.banned_openers")
     sem = config["semantic"]
-    if not isinstance(sem.get("brand_profile"), str):
-        raise ValueError("Config error: semantic.brand_profile must be a string.")
-    for key in ("min_relevance", "covered_threshold", "relevance_weight"):
+    for key in ("brand_profile", "site_posts_file"):
+        if not isinstance(sem.get(key), str):
+            raise ValueError(f"Config error: semantic.{key} must be a string.")
+    if not isinstance(sem.get("link_template"), str) or "{slug}" not in sem["link_template"]:
+        raise ValueError("Config error: semantic.link_template must be a string containing {slug}.")
+    for key in ("min_relevance", "covered_threshold", "relevance_weight", "link_min_similarity", "duplicate_threshold"):
         if isinstance(sem.get(key), bool) or not isinstance(sem.get(key), (int, float)):
             raise ValueError(f"Config error: semantic.{key} must be a number.")
     return config
@@ -263,6 +275,36 @@ class ArticleSuggestion:
 
 
 @dataclass
+class RelatedLink:
+    slug: str
+    title: str
+    url: str
+    score: float
+    # Already listed in this draft's "Related reads" section.
+    included: bool
+
+
+@dataclass
+class NearDuplicate:
+    title: str
+    # "site" for a published post (ref is its URL) or "draft" (ref is the filename).
+    kind: str
+    ref: str
+    score: float
+
+
+@dataclass
+class RelatedLinksResult:
+    filename: str
+    engine: str
+    # URL of this draft's own published copy, when its title matches a live post.
+    published_as: str
+    links: list[RelatedLink]
+    near_duplicates: list[NearDuplicate]
+    message: str
+
+
+@dataclass
 class SimilarArticle:
     filename: str
     title: str
@@ -352,6 +394,68 @@ def _draft_named_for(topic: dict, files: list) -> str:
         if any(slug and slug in f.stem.lower() for slug in slugs):
             return f.name
     return ""
+
+
+RELATED_HEADING = "## Related reads"
+
+
+def _split_related(text: str) -> tuple:
+    """Splits a draft into (body, existing "Related reads" section or "")."""
+    m = re.search(rf"^{re.escape(RELATED_HEADING)}\s*$", text, re.MULTILINE)
+    if not m:
+        return text, ""
+    rest = text[m.start():]
+    nxt = re.search(r"^#{1,2} ", rest[len(RELATED_HEADING):], re.MULTILINE)
+    end = m.start() + len(RELATED_HEADING) + nxt.start() if nxt else len(text)
+    return text[: m.start()] + text[end:], text[m.start():end]
+
+
+def _site_posts_path():
+    configured = CONFIG["semantic"]["site_posts_file"].strip()
+    if configured:
+        return Path(configured).expanduser()
+    writer_cfg = WAYZYY_WRITER_DIR / "config.yaml"
+    if yaml is None or not writer_cfg.is_file():
+        return None
+    try:
+        repo = (yaml.safe_load(writer_cfg.read_text(encoding="utf-8")) or {}).get("site_repo_path")
+    except Exception:
+        return None
+    return Path(repo).expanduser() / "src" / "lib" / "blogPosts.ts" if repo else None
+
+
+_POST_RE = re.compile(
+    r'slug:\s*"([^"]+)",\s*title:\s*"((?:[^"\\]|\\.)*)",\s*description:\s*"((?:[^"\\]|\\.)*)"', re.S)
+
+
+def _site_posts() -> list:
+    """Published posts as (slug, title, description), read from the site's blogPosts.ts."""
+    path = _site_posts_path()
+    if not path or not path.is_file():
+        return []
+    return [(slug, title.replace('\\"', '"'), desc.replace('\\"', '"'))
+            for slug, title, desc in _POST_RE.findall(path.read_text(encoding="utf-8", errors="ignore"))]
+
+
+def _post_url(slug: str) -> str:
+    return CONFIG["semantic"]["link_template"].format(slug=slug)
+
+
+# Titles this similar are the same article (a draft and its published copy).
+_SAME_TITLE = 0.97
+
+
+def _publisher_slug(title: str) -> str:
+    """The site publisher's base slug: the title before ':', without '(2026)'. It may
+    append a word when the slug is taken, so a published copy's slug starts with this."""
+    core = re.sub(r"\(\d{4}\)", "", title.split(":")[0]).strip()
+    return re.sub(r"[^a-z0-9]+", "-", core.lower()).strip("-")
+
+
+def _is_published_copy(draft_title: str, post_slug: str) -> bool:
+    base = _publisher_slug(draft_title)
+    # Too short a base ("goa") would match most posts, so only use specific ones.
+    return base.count("-") >= 2 and (post_slug == base or post_slug.startswith(base + "-"))
 
 
 def _brand_profile() -> str:
@@ -956,6 +1060,107 @@ class ArticlePipelineService:
         for f, text, score in ranked:
             results.append(SimilarArticle(filename=f.name, title=_draft_title(f, text), score=round(score, 3), engine=engine))
         return results, engine, ms
+
+    def suggest_related_links(self, filename: str, limit: int = 3) -> str:
+        """
+        Suggests published posts (from the site's blogPosts.ts) to link from this draft
+        as "Related reads", with their real URLs, and flags near-duplicate titles among
+        posts and drafts. Uses Superlinked SIE embeddings when reachable (off-brand
+        drafts get no suggestions); otherwise falls back to shared-word overlap.
+        Nothing is written: see insert_related_links.
+        """
+        source = _find_draft(filename)
+        limit = int(limit) if limit else 3  # Graftcode does not apply Python default args
+        sem = CONFIG["semantic"]
+        text = source.read_text(encoding="utf-8", errors="ignore")
+        body, related = _split_related(text)
+        title = _draft_title(source, text)
+        posts = _site_posts()
+        files, texts = self._draft_corpus()
+        others = [(f, _draft_title(f, t)) for f, t in zip(files, texts) if f.resolve() != source.resolve()]
+        if not posts:
+            path = _site_posts_path()
+            return _to_json(RelatedLinksResult(
+                filename=source.name, engine="none", published_as="", links=[], near_duplicates=[],
+                message=f"No published posts found ({path or 'set semantic.site_posts_file'}), so there is nothing to link to.",
+            ))
+
+        post_texts = [f"{t}. {d}" for _, t, d in posts]
+        engine, on_brand, link_scores, title_scores, draft_title_scores = "keyword-overlap", None, None, None, None
+        if SIE_URL:
+            try:
+                n = len(posts)
+                v = _embed_cached([body, title, _brand_profile()] + post_texts + [t for _, t, _ in posts] + [t for _, t in others])
+                b, tv, profile = v[0], v[1], v[2]
+                link_scores = [_cosine(b, x) for x in v[3:3 + n]]
+                title_scores = [_cosine(tv, x) for x in v[3 + n:3 + 2 * n]]
+                draft_title_scores = [_cosine(tv, x) for x in v[3 + 2 * n:]]
+                on_brand = _cosine(profile, tv) >= sem["min_relevance"]
+                engine = f"sie:{SIE_MODEL}"
+            except Exception as exc:
+                _log_sie_fallback(exc)
+        if link_scores is None:
+            words, norm = _tokens(body), title.strip().lower()
+            link_scores = [len(words & _tokens(p)) / (len(_tokens(p)) or 1) for p in post_texts]
+            title_scores = [1.0 if t.strip().lower() == norm else 0.0 for _, t, _ in posts]
+            draft_title_scores = [1.0 if t.strip().lower() == norm else 0.0 for _, t in others]
+
+        same = [j for j, sc in enumerate(title_scores)
+                if sc >= _SAME_TITLE or _is_published_copy(title, posts[j][0])]
+        own = max(same, key=lambda j: link_scores[j]) if same else None
+        duplicates = [
+            NearDuplicate(title=posts[j][1], kind="site", ref=_post_url(posts[j][0]), score=round(title_scores[j], 3))
+            for j in sorted(range(len(posts)), key=lambda j: -title_scores[j])
+            if j != own and title_scores[j] >= sem["duplicate_threshold"]
+        ] + [
+            NearDuplicate(title=t, kind="draft", ref=f.name, score=round(sc, 3))
+            for (f, t), sc in zip(others, draft_title_scores) if sc >= sem["duplicate_threshold"]
+        ]
+
+        candidates = [
+            j for j in sorted(range(len(posts)), key=lambda j: -link_scores[j])
+            if j != own and title_scores[j] < sem["duplicate_threshold"] and f"]({_post_url(posts[j][0])})" not in body
+        ]
+        message = ""
+        if on_brand is False:
+            links, message = [], "This draft looks off-brand, so no related reads are suggested for it."
+        else:
+            floor = sem["link_min_similarity"] if on_brand is not None else 0.0
+            links = [
+                RelatedLink(slug=posts[j][0], title=posts[j][1], url=_post_url(posts[j][0]),
+                            score=round(link_scores[j], 3), included=f"]({_post_url(posts[j][0])})" in related)
+                for j in candidates if link_scores[j] > floor
+            ][:limit]
+            if on_brand is None:
+                message = "Keyword overlap only: start Superlinked SIE (SIE_URL) for meaning-based suggestions."
+            elif not links:
+                message = f"No published post is similar enough (link_min_similarity {sem['link_min_similarity']})."
+        return _to_json(RelatedLinksResult(
+            filename=source.name, engine=engine, published_as=_post_url(posts[own][0]) if own is not None else "",
+            links=links, near_duplicates=duplicates, message=message,
+        ))
+
+    def insert_related_links(self, filename: str, slugs: str) -> str:
+        """
+        Writes a "## Related reads" section linking to the given published posts
+        (comma-separated slugs, usually from suggest_related_links), replacing any
+        existing one. An empty list removes the section. Returns the saved draft's details.
+        """
+        source = _find_draft(filename)
+        if source.name != Path(filename).name:
+            raise ValueError(f"Give the exact draft filename to edit (closest match: {source.name}).")
+        posts = {slug: title for slug, title, _ in _site_posts()}
+        lines = []
+        for slug in [x.strip() for x in (slugs or "").split(",") if x.strip()]:
+            if slug not in posts:
+                raise ValueError(f"No published post with slug '{slug}'.")
+            lines.append(f"[{posts[slug]}]({_post_url(slug)})")
+        body, _ = _split_related(source.read_text(encoding="utf-8", errors="ignore"))
+        body = body.rstrip() + "\n"
+        if lines:
+            # One link per paragraph: the site publisher turns each line into a <p>.
+            body += f"\n{RELATED_HEADING}\n\n" + "\n\n".join(lines) + "\n"
+        return self.save_draft(source.name, body)
 
     def push_to_github(self, filename: str) -> str:
         """

@@ -69,3 +69,12 @@ semantic:
   covered_threshold: 0.75
   # Points added per unit of relevance (relevance 0.4 adds 12).
   relevance_weight: 30
+  # Related reads link to published posts in the site's blogPosts.ts. Empty means
+  # <site_repo_path from the writer's config.yaml>/src/lib/blogPosts.ts.
+  site_posts_file: ""
+  # A draft's text must be at least this similar to a post's title and description.
+  link_min_similarity: 0.6
+  # A draft title at least this similar to another title is flagged as a near-duplicate.
+  duplicate_threshold: 0.85
+  # Site URL of a post.
+  link_template: "/blog/{slug}"

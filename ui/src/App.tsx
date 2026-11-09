@@ -23,6 +23,7 @@ import confetti from 'canvas-confetti'
 import { callGraft, mcpListTools } from './graft'
 import Architecture from './Architecture'
 import SemanticSearch from './SemanticSearch'
+import RelatedReads from './RelatedReads'
 
 interface Topic {
   id: string
@@ -113,6 +114,8 @@ export default function App() {
       runStyleCheck: [body.filename ?? ''],
       pushToGithub: [body.filename ?? ''],
       compareSearchEngines: [body.query ?? '', body.limit ?? 3],
+      suggestRelatedLinks: [body.filename ?? '', body.limit ?? 3],
+      insertRelatedLinks: [body.filename ?? '', body.slugs ?? ''],
     }
     try {
       const { data } = await callGraft(method, ...(args[method] ?? []))
@@ -693,6 +696,15 @@ export default function App() {
                   />
                 </div>
               </div>
+
+              {selectedDraft && (
+                <RelatedReads
+                  filename={selectedDraft}
+                  dirty={dirty}
+                  call={callGraftRpc}
+                  onInserted={() => loadDraft(selectedDraft)}
+                />
+              )}
             </div>
           )}
 

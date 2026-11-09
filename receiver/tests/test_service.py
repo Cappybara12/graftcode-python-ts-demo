@@ -177,8 +177,8 @@ def test_sie_embeds_each_draft_once(service, monkeypatch):
 
 # ── Phase 1: brand relevance and coverage with SIE (embeddings faked by keyword) ──
 
-def _fake_sie(monkeypatch):
-    """Fake SIE: a text's vector is [on-brand, politics, cafe, villa]."""
+def _fake_sie(monkeypatch, extra=()):
+    """Fake SIE: a text's vector is [on-brand, politics, cafe, villa, *extra words]."""
     def embed(texts):
         out = []
         for t in texts:
@@ -188,7 +188,7 @@ def _fake_sie(monkeypatch):
                 float("bjp" in t),
                 float("cafe" in t),
                 float("villa" in t),
-            ])
+            ] + [float(w in t) for w in extra])
         return out
 
     monkeypatch.setattr("article_receiver.service.SIE_URL", "http://sie")
@@ -250,3 +250,135 @@ def test_topic_list_shows_relevance_and_coverage(service, monkeypatch):
 def test_topic_list_without_sie_has_no_relevance(service, monkeypatch):
     monkeypatch.setattr("article_receiver.service.SIE_URL", "")
     assert all(t["relevance"] is None for t in json.loads(service.list_pending_topics()))
+
+
+# ── Phase 2: related reads from published posts ──
+
+POSTS_TS = '''export const blogPosts: BlogPostMeta[] = [
+  {
+    slug: "working-from-a-cafe-in-assagao",
+    title: "Working From a Cafe in Assagao: A Practical Guide",
+    description: "Laptop-friendly cafes in Assagao.",
+  },
+  {
+    slug: "best-cafes-north-goa",
+    title: "Best Cafes in North Goa",
+    description: "Coffee, wifi and quiet cafe mornings in North Goa.",
+  },
+  {
+    slug: "goa-villa-guide",
+    title: "Villas in Goa",
+    description: "How to pick a villa with a pool.",
+  },
+  {
+    slug: "assembly-politics",
+    title: "BJP dispute explained",
+    description: "Local BJP politics.",
+  },
+];
+'''
+
+DRAFT = "2026-01-01_sample-assagao-cafe-guide.md"
+
+
+def _posts_file(tmp_path, monkeypatch, text=POSTS_TS):
+    from article_receiver import service as svc_mod
+    path = tmp_path / "blogPosts.ts"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setitem(svc_mod.CONFIG["semantic"], "site_posts_file", str(path))
+    return path
+
+
+def _draft_path():
+    import os, pathlib
+    return pathlib.Path(os.environ["WAYZYY_DRAFTS_DIR"]) / DRAFT
+
+
+def test_related_links_need_published_posts(service, monkeypatch, tmp_path):
+    from article_receiver import service as svc_mod
+    monkeypatch.setitem(svc_mod.CONFIG["semantic"], "site_posts_file", str(tmp_path / "missing.ts"))
+    out = json.loads(service.suggest_related_links(DRAFT, 3))
+    assert out["links"] == [] and "No published posts" in out["message"]
+
+
+def test_related_links_keyword_fallback(service, monkeypatch, tmp_path):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    _posts_file(tmp_path, monkeypatch)
+    out = json.loads(service.suggest_related_links(DRAFT, 3))
+    assert out["engine"] == "keyword-overlap" and "Superlinked SIE" in out["message"]
+    # The post with the same title is this draft's published copy, never a link.
+    assert out["published_as"] == "/blog/working-from-a-cafe-in-assagao"
+    assert out["links"][0]["url"] == "/blog/best-cafes-north-goa"
+    assert all(l["slug"] != "working-from-a-cafe-in-assagao" for l in out["links"])
+
+
+def test_related_links_with_sie_skip_weak_matches(service, monkeypatch, tmp_path):
+    _fake_sie(monkeypatch, extra=("assagao", "north"))
+    _posts_file(tmp_path, monkeypatch)
+    out = json.loads(service.suggest_related_links(DRAFT, 3))
+    assert out["engine"].startswith("sie:")
+    assert out["published_as"] == "/blog/working-from-a-cafe-in-assagao"
+    slugs = [l["slug"] for l in out["links"]]
+    assert slugs[0] == "best-cafes-north-goa"
+    assert "assembly-politics" not in slugs  # below link_min_similarity
+
+
+def test_related_links_skip_offbrand_drafts(service, monkeypatch, tmp_path):
+    _fake_sie(monkeypatch, extra=("assagao", "north"))
+    _posts_file(tmp_path, monkeypatch)
+    _draft_path().write_text("# BJP dispute in Sanguem\n\nBJP leaders disagree.\n", encoding="utf-8")
+    out = json.loads(service.suggest_related_links(DRAFT, 3))
+    assert out["links"] == [] and "off-brand" in out["message"]
+
+
+def test_related_links_flag_near_duplicate_posts(service, monkeypatch, tmp_path):
+    _fake_sie(monkeypatch, extra=("assagao", "north"))
+    extra_post = '  {\n    slug: "assagao-cafe-notes",\n    title: "Assagao Cafe Notes",\n    description: "More cafes.",\n  },\n];'
+    _posts_file(tmp_path, monkeypatch, POSTS_TS.replace("];", extra_post))
+    out = json.loads(service.suggest_related_links(DRAFT, 3))
+    assert out["published_as"] == "/blog/working-from-a-cafe-in-assagao"
+    dup_refs = [d["ref"] for d in out["near_duplicates"]]
+    assert dup_refs == ["/blog/assagao-cafe-notes"]  # a second live post on the same topic
+    assert all(l["url"] not in dup_refs for l in out["links"])
+
+
+def test_insert_related_links_writes_and_replaces_section(service, monkeypatch, tmp_path):
+    _posts_file(tmp_path, monkeypatch)
+    service.insert_related_links(DRAFT, "best-cafes-north-goa, goa-villa-guide")
+    text = _draft_path().read_text(encoding="utf-8")
+    assert "## Related reads\n\n[Best Cafes in North Goa](/blog/best-cafes-north-goa)\n\n[Villas in Goa](/blog/goa-villa-guide)\n" in text
+    service.insert_related_links(DRAFT, "goa-villa-guide")
+    text = _draft_path().read_text(encoding="utf-8")
+    assert text.count("## Related reads") == 1 and "best-cafes-north-goa" not in text
+    assert "Photo credit: Pexels." in text  # the body is kept
+    service.insert_related_links(DRAFT, "")
+    assert "## Related reads" not in _draft_path().read_text(encoding="utf-8")
+
+
+def test_insert_related_links_marks_included(service, monkeypatch, tmp_path):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    _posts_file(tmp_path, monkeypatch)
+    service.insert_related_links(DRAFT, "best-cafes-north-goa")
+    links = {l["slug"]: l for l in json.loads(service.suggest_related_links(DRAFT, 3))["links"]}
+    assert links["best-cafes-north-goa"]["included"] is True
+
+
+def test_insert_related_links_rejects_bad_input(service, monkeypatch, tmp_path):
+    _posts_file(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="No published post"):
+        service.insert_related_links(DRAFT, "not-a-post")
+    with pytest.raises(ValueError, match="exact draft filename"):
+        service.insert_related_links("assagao", "goa-villa-guide")
+
+
+def test_split_related_keeps_later_sections():
+    from article_receiver.service import _split_related
+    body, section = _split_related("# T\n\nIntro\n\n## Related reads\n\n[a](/blog/a)\n\n## FAQ\n\nQ\n")
+    assert section.startswith("## Related reads") and "[a](/blog/a)" in section
+    assert "## FAQ" in body and "[a]" not in body
+
+
+def test_publisher_slug_matches_site_rule():
+    from article_receiver.service import _is_published_copy
+    assert _is_published_copy("Tambdi Surla Temple Goa (2026): The Honest Guide", "tambdi-surla-temple-goa-guide")
+    assert not _is_published_copy("Goa (2026): Spiritual Tourism", "goa-nightlife-guide")  # "goa" is too generic

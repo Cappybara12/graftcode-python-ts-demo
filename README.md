@@ -215,6 +215,15 @@ With SIE running, the pipeline also uses it to pick topics (thresholds in the co
 - `list_pending_topics` adds `relevance`, `on_brand` and `covered_by` to each topic, and the Topic
   Queue shows them as badges with a "Sort by brand relevance" toggle.
 
+- `suggest_related_links(filename, limit)` finds **published posts** (read from the site's
+  `src/lib/blogPosts.ts`, using `site_repo_path` from the writer's config or `site_posts_file`) that a
+  draft should link to, with their real `/blog/<slug>` URLs. It skips the draft's own published copy,
+  off-brand drafts and posts below `link_min_similarity`, and flags titles at least
+  `duplicate_threshold` similar as possible duplicates. Draft Studio shows these under
+  **Related reads**, and `insert_related_links(filename, slugs)` writes the chosen ones as a
+  `## Related reads` section (one link per line, as the site publisher expects), replacing any
+  existing section. Only published posts are linked, so the live article never gets a 404 link.
+
 Coverage compares topics with draft titles rather than full text: a short topic is loosely similar to
 every long article about the same place, so whole-text scores marked unrelated topics as covered.
 Without SIE these methods behave exactly as before, and the gateway log says why SIE was skipped.
