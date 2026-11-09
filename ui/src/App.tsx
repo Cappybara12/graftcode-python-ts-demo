@@ -31,6 +31,10 @@ interface Topic {
   category: string
   sources_count: number
   snippet: string
+  // Set only when the gateway reaches a Superlinked SIE server.
+  relevance: number | null
+  on_brand: boolean | null
+  covered_by: string
 }
 
 interface Draft {
@@ -91,6 +95,7 @@ export default function App() {
   const [rpcLogs, setRpcLogs] = useState<RpcLog[]>([])
   const [mcpTools, setMcpTools] = useState<string[] | null>(null)
   const [catFilter, setCatFilter] = useState('All')
+  const [sortByRelevance, setSortByRelevance] = useState(false)
   const [prResult, setPrResult] = useState<any>(null)
   const [scanResult, setScanResult] = useState<any>(null)
   const [suggestion, setSuggestion] = useState<any>(null)
@@ -225,7 +230,11 @@ export default function App() {
 
   const brandName = status?.active_brand?.split(' (')[0] ?? 'Content Engine'
 
-  const filtered = catFilter === 'All' ? topics : topics.filter(t => t.category === catFilter)
+  const hasRelevance = topics.some(t => t.relevance != null)
+  const byCategory = catFilter === 'All' ? topics : topics.filter(t => t.category === catFilter)
+  const filtered = sortByRelevance && hasRelevance
+    ? [...byCategory].sort((a, b) => (b.relevance ?? -1) - (a.relevance ?? -1))
+    : byCategory
 
   return (
     <div className="shell">
@@ -399,6 +408,9 @@ export default function App() {
                       <div style={{ color: 'var(--text-muted)', lineHeight: 1.5 }}>{suggestion.rationale}</div>
                       <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                         {suggestion.matched_signals?.map((k: string) => <span key={k} className="tag">{k}</span>)}
+                        {suggestion.relevance != null && (
+                          <span className="badge badge-green">SIE brand relevance {suggestion.relevance.toFixed(2)}</span>
+                        )}
                       </div>
                     </div>
                   )}
@@ -517,13 +529,37 @@ export default function App() {
                     }}
                   >{c}</button>
                 ))}
+                {hasRelevance && (
+                  <button
+                    onClick={() => setSortByRelevance(v => !v)}
+                    style={{
+                      marginLeft: 'auto', padding: '5px 14px', borderRadius: 20, fontSize: 12, fontWeight: 600,
+                      border: '1px solid var(--accent-border)', cursor: 'pointer',
+                      background: sortByRelevance ? 'var(--accent)' : 'var(--accent-light)',
+                      color: sortByRelevance ? '#fff' : 'var(--accent)',
+                    }}
+                  >Sort by brand relevance (SIE)</button>
+                )}
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 14 }}>
                 {filtered.map(topic => (
-                  <div key={topic.id} className="topic-card">
+                  <div key={topic.id} className="topic-card" style={topic.on_brand === false || topic.covered_by ? { opacity: 0.6 } : undefined}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span className="badge badge-gray">{topic.category}</span>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <span className="badge badge-gray">{topic.category}</span>
+                        {topic.relevance != null && (
+                          <span
+                            className={`badge ${topic.on_brand ? 'badge-green' : 'badge-amber'}`}
+                            title="Similarity to the brand profile, from Superlinked SIE embeddings"
+                          >
+                            {topic.on_brand ? 'On-brand' : 'Off-brand'} {topic.relevance.toFixed(2)}
+                          </span>
+                        )}
+                        {topic.covered_by && (
+                          <span className="badge badge-pink" title={`Already covered by ${topic.covered_by}`}>Already covered</span>
+                        )}
+                      </div>
                       <button
                         className="btn-ghost"
                         style={{ fontSize: 12, padding: '4px 8px' }}

@@ -173,3 +173,80 @@ def test_sie_embeds_each_draft_once(service, monkeypatch):
     service.find_similar_articles("first", 2)
     service.find_similar_articles("second", 2)
     assert calls[0] > 1 and calls[1] == 1  # second search embeds only the query
+
+
+# ── Phase 1: brand relevance and coverage with SIE (embeddings faked by keyword) ──
+
+def _fake_sie(monkeypatch):
+    """Fake SIE: a text's vector is [on-brand, politics, cafe, villa]."""
+    def embed(texts):
+        out = []
+        for t in texts:
+            t = t.lower()
+            out.append([
+                float(any(w in t for w in ("goa", "villa", "beach", "cafe", "travel", "monsoon"))),
+                float("bjp" in t),
+                float("cafe" in t),
+                float("villa" in t),
+            ])
+        return out
+
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "http://sie")
+    monkeypatch.setattr("article_receiver.service._EMBED_CACHE", {})
+    monkeypatch.setattr("article_receiver.service._embed_with_sie", embed)
+
+
+def _add_offbrand_topic(sources=50):
+    import os, pathlib
+    review = pathlib.Path(os.environ["WAYZYY_REVIEW_DIR"])
+    links = "\n".join(f"- [news] [Story {i}](https://example.com/{i})" for i in range(sources))
+    (review / "2026-01-09_bjp-dispute.md").write_text(
+        f"---\nkeyword: BJP dispute\n---\n\n## Trend Sources\n{links}\n", encoding="utf-8")
+
+
+def test_keyword_suggest_picks_a_popular_offbrand_topic(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    _add_offbrand_topic()
+    suggestion = json.loads(service.suggest_next_article())
+    assert suggestion["topic"] == "BJP dispute"  # the behaviour SIE fixes
+    assert suggestion["engine"] == "keyword" and suggestion["relevance"] is None
+
+
+def test_sie_suggest_skips_offbrand_and_covered_topics(service, monkeypatch):
+    _fake_sie(monkeypatch)
+    _add_offbrand_topic()
+    suggestion = json.loads(service.suggest_next_article())
+    assert "Vagator" in suggestion["topic"]
+    assert suggestion["skipped_off_brand"] == 1  # BJP dispute
+    assert suggestion["skipped_covered"] == 1  # cafes topic vs the Assagao cafe draft
+    assert suggestion["engine"].startswith("keyword + sie:")
+    assert suggestion["relevance"] > 0.25 and "Superlinked SIE" in suggestion["rationale"]
+
+
+def test_sie_suggest_explains_when_nothing_is_left(service, monkeypatch):
+    _fake_sie(monkeypatch)
+    monkeypatch.setitem(__import__("article_receiver.service", fromlist=["CONFIG"]).CONFIG["semantic"], "min_relevance", 2.0)
+    with pytest.raises(ValueError, match="min_relevance"):
+        service.suggest_next_article()
+
+
+def test_unreachable_sie_keeps_keyword_suggestions(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    expected = json.loads(service.suggest_next_article())["topic"]
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "http://127.0.0.1:9")
+    suggestion = json.loads(service.suggest_next_article())
+    assert suggestion["topic"] == expected and suggestion["engine"] == "keyword"
+
+
+def test_topic_list_shows_relevance_and_coverage(service, monkeypatch):
+    _fake_sie(monkeypatch)
+    topics = {t["title"].lower(): t for t in json.loads(service.list_pending_topics())}
+    cafes = next(t for k, t in topics.items() if "cafe" in k)
+    villas = next(t for k, t in topics.items() if "villa" in k)
+    assert cafes["covered_by"].endswith("assagao-cafe-guide.md")
+    assert villas["covered_by"] == "" and villas["relevance"] > 0.25
+
+
+def test_topic_list_without_sie_has_no_relevance(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    assert all(t["relevance"] is None for t in json.loads(service.list_pending_topics()))

@@ -206,6 +206,19 @@ and SIE results side by side, with the time each took. Draft embeddings are cach
 first search only the query is embedded. The very first query after starting SIE downloads the
 model and can take about a minute, so run one before a demo.
 
+With SIE running, the pipeline also uses it to pick topics (thresholds in the config's `semantic:` section):
+
+- `suggest_next_article` skips **off-brand** topics (similarity to `brand_profile` below
+  `min_relevance`) and topics an existing draft **already covers** (similarity to a draft's title of
+  at least `covered_threshold`), and adds `relevance × relevance_weight` to each topic's score. The
+  rationale says how many topics were skipped.
+- `list_pending_topics` adds `relevance`, `on_brand` and `covered_by` to each topic, and the Topic
+  Queue shows them as badges with a "Sort by brand relevance" toggle.
+
+Coverage compares topics with draft titles rather than full text: a short topic is loosely similar to
+every long article about the same place, so whole-text scores marked unrelated topics as covered.
+Without SIE these methods behave exactly as before, and the gateway log says why SIE was skipped.
+
 ## Attach the real pipeline (optional)
 
 Copy `.env.example` and export the variables you need, for example `WAYZYY_WRITER_DIR`,

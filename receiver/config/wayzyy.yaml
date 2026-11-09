@@ -57,3 +57,15 @@ style:
 
 # Optional: folder (relative to this file) with review/ and drafts/ used in demo mode.
 # data_dir: data
+
+# Optional: semantic checks with a self-hosted Superlinked SIE server (only used when SIE_URL
+# is set and reachable). Similarities are cosine scores between -1 and 1.
+semantic:
+  # What an on-brand article is about. Topics are compared against this text.
+  brand_profile: "Travel guide for tourists visiting Goa: where to stay, villas, beaches, food, things to do"
+  # Suggest skips topics less similar than this to the brand profile.
+  min_relevance: 0.25
+  # Suggest skips topics at least this similar to an existing draft's title (already covered).
+  covered_threshold: 0.75
+  # Points added per unit of relevance (relevance 0.4 adds 12).
+  relevance_weight: 30

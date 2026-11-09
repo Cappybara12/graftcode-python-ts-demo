@@ -1,4 +1,5 @@
 import glob as _glob
+import hashlib
 import os
 import sys
 import re
@@ -8,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from typing import Optional
 from pathlib import Path
 from datetime import datetime
 
@@ -52,6 +54,17 @@ _DEFAULT_CONFIG = {
         "attribution_keyword": "pexels",
         "publish_threshold": 85,
     },
+    # Used only when a Superlinked SIE server is reachable (SIE_URL); otherwise ignored.
+    "semantic": {
+        # What an on-brand article is about. Empty means "<brand name>: <brand description>".
+        "brand_profile": "Travel guide for tourists visiting Goa: where to stay, villas, beaches, food, things to do",
+        # Suggest skips topics less similar than this to the brand profile.
+        "min_relevance": 0.25,
+        # Suggest skips topics at least this similar to an existing draft's title.
+        "covered_threshold": 0.75,
+        # Points added to a suggestion score per unit of relevance (relevance 0.4 -> +12).
+        "relevance_weight": 30,
+    },
 }
 
 
@@ -75,7 +88,7 @@ def _load_config(path) -> dict:
         user = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         if not isinstance(user, dict):
             raise ValueError(f"Config error: {path} must contain a mapping at the top level.")
-        for section in ("brand", "categories", "suggestion", "style"):
+        for section in ("brand", "categories", "suggestion", "style", "semantic"):
             if section in user:
                 if not isinstance(user[section], dict):
                     raise ValueError(f"Config error: '{section}' must be a mapping.")
@@ -92,6 +105,12 @@ def _load_config(path) -> dict:
         _str_list(tier, f"suggestion.tiers[{i}]")
     _str_list(config["style"]["banned_words"], "style.banned_words")
     _str_list(config["style"]["banned_openers"], "style.banned_openers")
+    sem = config["semantic"]
+    if not isinstance(sem.get("brand_profile"), str):
+        raise ValueError("Config error: semantic.brand_profile must be a string.")
+    for key in ("min_relevance", "covered_threshold", "relevance_weight"):
+        if isinstance(sem.get(key), bool) or not isinstance(sem.get(key), (int, float)):
+            raise ValueError(f"Config error: semantic.{key} must be a number.")
     return config
 
 
@@ -162,6 +181,11 @@ class Topic:
     category: str
     sources_count: int
     snippet: str
+    # Filled only when Superlinked SIE is reachable: similarity to the brand profile,
+    # and the existing draft that already covers this topic (if any).
+    relevance: Optional[float] = None
+    on_brand: Optional[bool] = None
+    covered_by: str = ""
 
 
 @dataclass
@@ -232,6 +256,10 @@ class ArticleSuggestion:
     score: int
     matched_signals: list[str]
     sources_count: int
+    relevance: Optional[float] = None
+    engine: str = "keyword"
+    skipped_off_brand: int = 0
+    skipped_covered: int = 0
 
 
 @dataclass
@@ -280,20 +308,85 @@ def _embed_with_sie(texts: list) -> list:
     return [[float(v) for v in r["dense"]] for r in results]
 
 
-# Draft embeddings keyed by (model, path, mtime, size): only new or edited drafts are re-embedded.
+# Embeddings keyed by (model, sha1 of the text): a draft, topic or query is embedded once,
+# and an edited draft is re-embedded because its text changed.
 _EMBED_CACHE: dict = {}
 
 
+def _embed_cached(texts: list) -> list:
+    keys = [(SIE_MODEL, hashlib.sha1(t.encode("utf-8")).hexdigest()) for t in texts]
+    missing = list(dict.fromkeys(k for k in keys if k not in _EMBED_CACHE))
+    if missing:
+        text_of = dict(zip(keys, texts))
+        for k, v in zip(missing, _embed_with_sie([text_of[k] for k in missing])):
+            _EMBED_CACHE[k] = v
+    return [_EMBED_CACHE[k] for k in keys]
+
+
 def _embed_drafts_and_query(query: str, files: list, texts: list) -> tuple:
-    keys = []
+    vectors = _embed_cached([query] + texts)
+    return vectors[0], vectors[1:]
+
+
+def _draft_title(path: Path, text: str) -> str:
+    """Front-matter `title:` or the first `# ` heading, else the filename."""
+    for line in text.splitlines()[:5]:
+        if line.startswith("title:"):
+            return line.replace("title:", "").strip().strip('"').strip("'")
+        if line.startswith("# "):
+            return line[2:].strip()
+    return path.stem.replace("-", " ").title()
+
+
+def _log_sie_fallback(exc: Exception) -> None:
+    """SIE is optional, so failures fall back to keywords; say why in the gateway log."""
+    print(f"[sie] {SIE_URL} unavailable, using keywords: {type(exc).__name__}: {exc}"[:500], file=sys.stderr, flush=True)
+
+
+def _draft_named_for(topic: dict, files: list) -> str:
+    """The draft whose filename contains the topic's slug, or "" (no embeddings needed)."""
+    slugs = {_slug(topic["title"])}
+    if "_" in topic["filename"]:
+        slugs.add(_slug(topic["filename"].split("_", 1)[1].rsplit(".", 1)[0]))
     for f in files:
-        st = f.stat()
-        keys.append((SIE_MODEL, str(f), st.st_mtime_ns, st.st_size))
-    missing = [i for i, k in enumerate(keys) if k not in _EMBED_CACHE]
-    vectors = _embed_with_sie([query] + [texts[i] for i in missing])
-    for i, v in zip(missing, vectors[1:]):
-        _EMBED_CACHE[keys[i]] = v
-    return vectors[0], [_EMBED_CACHE[k] for k in keys]
+        if any(slug and slug in f.stem.lower() for slug in slugs):
+            return f.name
+    return ""
+
+
+def _brand_profile() -> str:
+    profile = CONFIG["semantic"]["brand_profile"].strip()
+    return profile or f"{CONFIG['brand']['name']}: {CONFIG['brand']['description']}"
+
+
+def _topic_signals(topics: list, files: list, texts: list):
+    """
+    With SIE reachable, returns for each topic (relevance to the brand profile,
+    closest draft filename, similarity to that draft's title). Returns None when SIE
+    is not configured or unreachable, so callers keep their keyword-only behaviour.
+
+    Coverage compares the topic with draft *titles*: a short topic is loosely similar
+    to every long article on the same destination, so whole-text scores over-match.
+    """
+    if not SIE_URL or not topics:
+        return None
+    titles = [_draft_title(f, t) for f, t in zip(files, texts)]
+    try:
+        vectors = _embed_cached([_brand_profile()] + [t["title"] for t in topics] + titles)
+    except Exception as exc:
+        _log_sie_fallback(exc)
+        return None
+    profile, topic_vecs, draft_vecs = vectors[0], vectors[1:1 + len(topics)], vectors[1 + len(topics):]
+    signals = []
+    for v in topic_vecs:
+        relevance = _cosine(profile, v)
+        best_file, best_score = "", 0.0
+        for f, d in zip(files, draft_vecs):
+            score = _cosine(v, d)
+            if score > best_score:
+                best_file, best_score = f.name, score
+        signals.append((round(relevance, 3), best_file, round(best_score, 3)))
+    return signals
 
 
 def _to_json(result) -> str:
@@ -445,8 +538,21 @@ class ArticlePipelineService:
     def list_pending_topics(self) -> str:
         """
         Retrieves pending topics in the review queue with metadata and source counts.
+        With Superlinked SIE reachable, each topic also gets a brand-relevance score and
+        the existing draft that already covers it, if any.
         """
-        return _to_json(self._load_topics()[:12])
+        topics = self._load_topics()[:12]
+        files, texts = self._draft_corpus()
+        signals = _topic_signals([asdict(t) for t in topics], files, texts)
+        if signals:
+            threshold = CONFIG["semantic"]["covered_threshold"]
+            for t, (relevance, draft, draft_score) in zip(topics, signals):
+                t.relevance = relevance
+                t.on_brand = relevance >= CONFIG["semantic"]["min_relevance"]
+                t.covered_by = draft if draft_score >= threshold else ""
+        for t in topics:
+            t.covered_by = t.covered_by or _draft_named_for(asdict(t), files)
+        return _to_json(topics)
 
     def _load_topics(self) -> list:
         """All pending topics (private helper: Graftcode does not apply Python default args)."""
@@ -702,6 +808,10 @@ class ArticlePipelineService:
         """
         Ranks the pending topics by business relevance (keyword tiers) and the
         number of real trend sources, and returns the best one to write next.
+
+        With Superlinked SIE reachable it also skips off-brand topics and topics an
+        existing draft already covers (by meaning, not filename), and adds the topic's
+        similarity to the brand profile to its score. Thresholds live in `semantic:`.
         """
         topics = [asdict(t) for t in self._load_topics()]
         if not topics:
@@ -709,17 +819,30 @@ class ArticlePipelineService:
 
         # The review queue is not pruned when an article is written, so skip topics
         # that already have a draft (matched on the topic slug inside the draft filename).
-        draft_names = [f.stem.lower() for f in DRAFTS_DIR.glob("*.md")] if DRAFTS_DIR.exists() else []
-
-        def has_draft(topic: dict) -> bool:
-            slugs = {_slug(topic["title"])}
-            if "_" in topic["filename"]:
-                slugs.add(_slug(topic["filename"].split("_", 1)[1].rsplit(".", 1)[0]))
-            return any(slug and slug in name for slug in slugs for name in draft_names)
-
-        topics = [t for t in topics if not has_draft(t)]
+        files, texts = self._draft_corpus()
+        topics = [t for t in topics if not _draft_named_for(t, files)]
         if not topics:
             raise ValueError("Every pending topic already has a draft. Run the scanner for new topics.")
+
+        sem = CONFIG["semantic"]
+        signals = _topic_signals(topics, files, texts)
+        skipped_off_brand = skipped_covered = 0
+        if signals:
+            kept = []
+            for t, (relevance, draft, draft_score) in zip(topics, signals):
+                if draft_score >= sem["covered_threshold"]:
+                    skipped_covered += 1
+                elif relevance < sem["min_relevance"]:
+                    skipped_off_brand += 1
+                else:
+                    kept.append({**t, "relevance": relevance})
+            if not kept:
+                raise ValueError(
+                    f"No on-brand, uncovered topics left ({skipped_off_brand} off-brand, "
+                    f"{skipped_covered} already covered by a draft). Run the scanner, or lower "
+                    "semantic.min_relevance in the pipeline config."
+                )
+            topics = kept
 
         tiers = CONFIG["suggestion"]["tiers"]
         best = None
@@ -732,19 +855,31 @@ class ArticlePipelineService:
                     matched += hits
                     tier_score = max(tier_score, (len(tiers) - i) * 10)
             score = tier_score + t["sources_count"]
+            if signals:
+                score += round(t["relevance"] * sem["relevance_weight"])
             if best is None or score > best[0]:
                 best = (score, t, matched)
         score, t, matched = best
+
+        rationale = (
+            f"Highest-scoring pending topic: {t['sources_count']} trend sources"
+            + (f"; matches business signals: {', '.join(matched)}" if matched else "; no business-keyword match")
+        )
+        if signals:
+            rationale += (
+                f"; brand relevance {t['relevance']:.2f} (Superlinked SIE). Skipped "
+                f"{skipped_off_brand} off-brand and {skipped_covered} already-covered topics"
+            )
         return _to_json(ArticleSuggestion(
             topic=t["title"],
-            rationale=(
-                f"Highest-scoring pending topic: {t['sources_count']} trend sources"
-                + (f"; matches business signals: {', '.join(matched)}" if matched else "; no business-keyword match")
-                + "."
-            ),
+            rationale=rationale + ".",
             score=score,
             matched_signals=matched,
             sources_count=t["sources_count"],
+            relevance=t["relevance"] if signals else None,
+            engine=f"keyword + sie:{SIE_MODEL}" if signals else "keyword",
+            skipped_off_brand=skipped_off_brand,
+            skipped_covered=skipped_covered,
         ))
 
     def find_similar_articles(self, query: str, limit: int = 3) -> str:
@@ -808,7 +943,8 @@ class ArticlePipelineService:
                 q_vec, doc_vecs = _embed_drafts_and_query(query, files, texts)
                 scores = [_cosine(q_vec, v) for v in doc_vecs]
                 engine = f"sie:{SIE_MODEL}"
-            except Exception:
+            except Exception as exc:
+                _log_sie_fallback(exc)
                 scores = None  # SIE missing or unreachable: use the fallback
         if scores is None:
             q = _tokens(query)
@@ -818,15 +954,7 @@ class ArticlePipelineService:
         ranked = sorted(zip(files, texts, scores), key=lambda x: x[2], reverse=True)[: max(1, limit)]
         results = []
         for f, text, score in ranked:
-            title = f.stem.replace("-", " ").title()
-            for line in text.splitlines()[:5]:
-                if line.startswith("title:"):
-                    title = line.replace("title:", "").strip().strip('"').strip("'")
-                    break
-                if line.startswith("# "):
-                    title = line[2:].strip()
-                    break
-            results.append(SimilarArticle(filename=f.name, title=title, score=round(score, 3), engine=engine))
+            results.append(SimilarArticle(filename=f.name, title=_draft_title(f, text), score=round(score, 3), engine=engine))
         return results, engine, ms
 
     def push_to_github(self, filename: str) -> str:

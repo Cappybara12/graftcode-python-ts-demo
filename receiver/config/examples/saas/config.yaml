@@ -31,4 +31,7 @@ style:
   attribution_keyword: ""
   publish_threshold: 90
 
+semantic:
+  brand_profile: "Practical articles for B2B SaaS teams about product analytics, metrics, dashboards and growth"
+
 data_dir: data
