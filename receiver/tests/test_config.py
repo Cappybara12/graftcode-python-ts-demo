@@ -96,3 +96,11 @@ def test_link_template_needs_slug(tmp_path):
     bad.write_text('semantic:\n  link_template: "/blog/"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="link_template"):
         _load_config(bad)
+
+
+def test_category_description_must_be_text(tmp_path):
+    from article_receiver.service import _load_config
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("categories:\n  rules:\n    - {name: X, keywords: [x], description: [1]}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="description"):
+        _load_config(bad)

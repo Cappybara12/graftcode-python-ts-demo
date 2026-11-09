@@ -448,3 +448,96 @@ def test_embeddings_survive_a_restart_with_a_disk_cache(service, monkeypatch, tm
     calls.clear()
     service.find_similar_articles("cafe", 1)
     assert calls == []  # everything came from disk
+
+
+# ── Phase 3: semantic categories ──
+
+def _test_rules(monkeypatch):
+    from article_receiver import service as svc_mod
+    monkeypatch.setitem(svc_mod.CONFIG["categories"], "rules", [
+        {"name": "Cafes", "keywords": ["zzz"], "description": "cafe spots"},
+        {"name": "Villas", "keywords": ["qqq"], "description": "villa stays"},
+    ])
+
+
+def test_topics_get_a_semantic_category_when_no_keyword_matches(service, monkeypatch):
+    _fake_sie(monkeypatch)
+    _test_rules(monkeypatch)
+    _add_offbrand_topic(sources=1)
+    topics = {t["title"].lower(): t for t in json.loads(service.list_pending_topics())}
+    cafes = next(t for k, t in topics.items() if "cafe" in k)
+    assert (cafes["category"], cafes["category_source"]) == ("Cafes", "sie")
+    bjp = topics["bjp dispute"]
+    assert (bjp["category"], bjp["category_source"]) == ("Local News", "sie")  # off-brand
+
+
+def test_keyword_rules_win_over_semantic_categories(service, monkeypatch):
+    _fake_sie(monkeypatch)
+    topics = json.loads(service.list_pending_topics())
+    assert all(t["category_source"] == "keyword" for t in topics)  # every sample topic has a keyword
+
+
+def test_categories_without_sie_use_keywords_or_default(service, monkeypatch):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    _test_rules(monkeypatch)
+    topics = json.loads(service.list_pending_topics())
+    assert {t["category"] for t in topics} == {"Guide"}
+    assert {t["category_source"] for t in topics} == {"default"}
+
+
+# ── Phase 4: evaluation ──
+
+LABELS = """labels:
+  - {topic: "Goa coffee spots", on_brand: true, covered: false, category: "Food & Nightlife"}
+  - {topic: "villas with pools in Vagator", on_brand: true, covered: false, category: "Stays & Villas"}
+  - {topic: "BJP dispute", on_brand: false, covered: false, category: "Local News"}
+"""
+
+
+def _labels(tmp_path, monkeypatch, text=LABELS):
+    from article_receiver import service as svc_mod
+    path = tmp_path / "labels.yaml"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setitem(svc_mod.CONFIG["semantic"], "eval_labels", str(path))
+
+
+def test_evaluation_without_sie_reports_keyword_only(service, monkeypatch, tmp_path):
+    monkeypatch.setattr("article_receiver.service.SIE_URL", "")
+    _labels(tmp_path, monkeypatch)
+    out = json.loads(service.evaluate_semantic_engine())
+    assert out["sie_available"] is False and out["labelled"] == 3
+    brand = out["tasks"][0]
+    assert brand["keyword"]["total"] == 3 and "sie" not in brand
+    assert all("sie" not in item for item in out["items"])
+
+
+def test_evaluation_with_sie_compares_both_engines(service, monkeypatch, tmp_path):
+    _fake_sie(monkeypatch)
+    _labels(tmp_path, monkeypatch)
+    out = json.loads(service.evaluate_semantic_engine())
+    brand, covered, category = out["tasks"]
+    assert brand["sie"]["accuracy"] == 1.0  # the fake separates BJP from the travel topics
+    assert brand["keyword"]["accuracy"] < 1.0  # "Goa coffee spots" has no tier keyword
+    assert [s["value"] for s in brand["sweep"]][0] == 0.1
+    assert covered["threshold"]["name"] == "covered_threshold"
+    assert {v["name"] for v in category["variants"]} >= {"SIE only"}
+    bjp = next(i for i in out["items"] if i["topic"] == "BJP dispute")
+    assert bjp["sie"]["on_brand"] is False and bjp["sie"]["category"] == "Local News"
+
+
+def test_evaluation_needs_a_labels_file(service, monkeypatch, tmp_path):
+    from article_receiver import service as svc_mod
+    monkeypatch.setitem(svc_mod.CONFIG["semantic"], "eval_labels", str(tmp_path / "missing.yaml"))
+    with pytest.raises(ValueError, match="No labels file"):
+        service.evaluate_semantic_engine()
+
+
+def test_bundled_labels_file_is_valid():
+    import pathlib, yaml
+    from article_receiver.service import CONFIG
+    path = pathlib.Path(__file__).resolve().parents[1] / "config" / "eval" / "wayzyy-labels.yaml"
+    labels = yaml.safe_load(path.read_text(encoding="utf-8"))["labels"]
+    names = {r["name"] for r in CONFIG["categories"]["rules"]}
+    assert len(labels) >= 50
+    assert all(set(x) == {"topic", "on_brand", "covered", "category"} for x in labels)
+    assert all(x["category"] in names for x in labels)

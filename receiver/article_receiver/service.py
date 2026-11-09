@@ -32,10 +32,51 @@ _DEFAULT_CONFIG = {
     "categories": {
         "default": "Guide",
         "rules": [
-            {"name": "Beaches", "keywords": ["beach"]},
-            {"name": "Stays & Villas", "keywords": ["rental", "villa"]},
-            {"name": "Food & Cafes", "keywords": ["food", "cafe"]},
-            {"name": "Seasonal", "keywords": ["monsoon"]},
+            {
+                "name": "Stays & Villas",
+                "keywords": ["villa", "vacation rental", "homestay", "where to stay", "airbnb"],
+                "description": "Where to stay in Goa: villas, vacation rentals, homestays, hotels, resorts and Airbnb alternatives",
+            },
+            {
+                "name": "Beaches",
+                "keywords": ["beach"],
+                "description": "Goa beaches: the best, quiet and hidden beaches in North and South Goa",
+            },
+            {
+                "name": "Food & Nightlife",
+                "keywords": ["food", "cafe", "restaurant", "nightlife"],
+                "description": "Eating and going out in Goa: restaurants, cafes, food, bars, clubs and nightlife",
+            },
+            {
+                "name": "Trip Planning",
+                "keywords": ["itinerary", "things to do", "budget", "family trip", "workation", "scooter", "travel guide"],
+                "description": "Planning a Goa trip: itineraries, things to do, budgets, family trips, workations and getting around",
+            },
+            {
+                "name": "Culture & Festivals",
+                "keywords": ["temple", "festival", "heritage", "pilgrimage", "yatra"],
+                "description": "Goa culture and heritage: temples, churches, pilgrimages, festivals and local traditions",
+            },
+            {
+                "name": "Nature & Monsoon",
+                "keywords": ["monsoon", "waterfall", "eco-tourism", "best time"],
+                "description": "Goa nature and seasons: monsoon travel, waterfalls, wildlife, eco-tourism and the best time to visit",
+            },
+            {
+                "name": "Travel Rules & Access",
+                "keywords": ["visa", "flight", "airport", "charter", "fine"],
+                "description": "Rules and access for visitors to Goa: visas, flights, airports, fines and safety rules for tourists",
+            },
+            {
+                "name": "Tourism & Property News",
+                "keywords": ["real estate", "second home", "appoints", "investment"],
+                "description": "Goa tourism business and property news: tourism policy, hotel launches, hospitality appointments, real estate and second homes",
+            },
+            {
+                "name": "Local News",
+                "keywords": ["bjp", "congress", "court", "bail", "police"],
+                "description": "Local news unrelated to travel: politics, crime, court cases, accidents, health and schools",
+            },
         ],
     },
     "suggestion": {
@@ -73,6 +114,13 @@ _DEFAULT_CONFIG = {
         "duplicate_threshold": 0.85,
         # Site URL of a post.
         "link_template": "/blog/{slug}",
+        # A topic no keyword rule matches gets the category whose description it is closest to,
+        # when at least this similar; otherwise categories.default.
+        "category_min_similarity": 0.3,
+        # Off-brand topics (below min_relevance) that no keyword rule matches go here. Empty to skip.
+        "off_brand_category": "Local News",
+        # Hand-labelled topics for the Evaluation page, relative to the config file.
+        "eval_labels": "eval/wayzyy-labels.yaml",
     },
 }
 
@@ -110,17 +158,20 @@ def _load_config(path) -> dict:
         if not isinstance(rule, dict) or "name" not in rule:
             raise ValueError("Config error: each category rule needs a 'name' and a 'keywords' list.")
         _str_list(rule.get("keywords", []), f"categories.rules[{rule['name']}].keywords")
+        if not isinstance(rule.get("description", ""), str):
+            raise ValueError(f"Config error: categories.rules[{rule['name']}].description must be a string.")
     for i, tier in enumerate(config["suggestion"]["tiers"]):
         _str_list(tier, f"suggestion.tiers[{i}]")
     _str_list(config["style"]["banned_words"], "style.banned_words")
     _str_list(config["style"]["banned_openers"], "style.banned_openers")
     sem = config["semantic"]
-    for key in ("brand_profile", "site_posts_file"):
+    for key in ("brand_profile", "site_posts_file", "eval_labels", "off_brand_category"):
         if not isinstance(sem.get(key), str):
             raise ValueError(f"Config error: semantic.{key} must be a string.")
     if not isinstance(sem.get("link_template"), str) or "{slug}" not in sem["link_template"]:
         raise ValueError("Config error: semantic.link_template must be a string containing {slug}.")
-    for key in ("min_relevance", "covered_threshold", "relevance_weight", "link_min_similarity", "duplicate_threshold"):
+    for key in ("min_relevance", "covered_threshold", "relevance_weight", "link_min_similarity", "duplicate_threshold",
+                "category_min_similarity"):
         if isinstance(sem.get(key), bool) or not isinstance(sem.get(key), (int, float)):
             raise ValueError(f"Config error: semantic.{key} must be a number.")
     return config
@@ -198,6 +249,8 @@ class Topic:
     relevance: Optional[float] = None
     on_brand: Optional[bool] = None
     covered_by: str = ""
+    # "keyword" (a rule matched), "sie" (closest category description) or "default".
+    category_source: str = "default"
 
 
 @dataclass
@@ -488,6 +541,47 @@ def _is_published_copy(draft_title: str, post_slug: str) -> bool:
     return base.count("-") >= 2 and (post_slug == base or post_slug.startswith(base + "-"))
 
 
+def _keyword_category(title: str):
+    """The first category rule whose keyword appears in the title, else None."""
+    for rule in CONFIG["categories"]["rules"]:
+        if any(k.lower() in title.lower() for k in rule.get("keywords", [])):
+            return rule["name"]
+    return None
+
+
+def _semantic_categories(titles: list, min_similarity=None):
+    """
+    For each title, the category whose description it is closest to in meaning (with
+    Superlinked SIE), or None when below category_min_similarity. Returns None when SIE
+    is not configured or unreachable. Rules without a description use their name.
+    """
+    rules = CONFIG["categories"]["rules"]
+    if not SIE_URL or not titles or not rules:
+        return None
+    floor = CONFIG["semantic"]["category_min_similarity"] if min_similarity is None else min_similarity
+    texts = [f"{r['name']}: {r.get('description') or r['name']}" for r in rules]
+    try:
+        v = _embed_cached(texts + list(titles))
+    except Exception as exc:
+        _log_sie_fallback(exc)
+        return None
+    cats, tv = v[: len(rules)], v[len(rules):]
+    out = []
+    for x in tv:
+        scores = [_cosine(x, c) for c in cats]
+        best = max(range(len(scores)), key=scores.__getitem__)
+        out.append(rules[best]["name"] if scores[best] >= floor else None)
+    return out
+
+
+def _eval_labels_path():
+    rel = CONFIG["semantic"]["eval_labels"].strip()
+    if not rel:
+        return None
+    base = Path(CONFIG["_path"]).parent if CONFIG.get("_path") else Path(__file__).resolve().parent.parent / "config"
+    return (base / rel).resolve()
+
+
 def _brand_profile() -> str:
     profile = CONFIG["semantic"]["brand_profile"].strip()
     return profile or f"{CONFIG['brand']['name']}: {CONFIG['brand']['description']}"
@@ -719,6 +813,13 @@ class ArticlePipelineService:
                 t.covered_by = draft if draft_score >= threshold else ""
         for t in topics:
             t.covered_by = t.covered_by or _draft_named_for(asdict(t), files)
+        unmatched = [t for t in topics if t.category_source == "default"]
+        semantic = _semantic_categories([t.title for t in unmatched]) if unmatched else None
+        off_brand = CONFIG["semantic"]["off_brand_category"]
+        for t, name in zip(unmatched, semantic or []):
+            name = (off_brand or name) if t.on_brand is False else name
+            if name:
+                t.category, t.category_source = name, "sie"
         return _to_json(topics)
 
     def _load_topics(self) -> list:
@@ -735,17 +836,15 @@ class ArticlePipelineService:
                     if keyword:
                         title = keyword.group(1).strip().strip('"').strip("'")
                     # extract category
-                    category = CONFIG["categories"]["default"]
-                    for rule in CONFIG["categories"]["rules"]:
-                        if any(k.lower() in title.lower() for k in rule.get("keywords", [])):
-                            category = rule["name"]
-                            break
+                    keyword_category = _keyword_category(title)
+                    category = keyword_category or CONFIG["categories"]["default"]
 
                     topics.append(Topic(
                         id=f.name,
                         title=title,
                         filename=f.name,
                         category=category,
+                        category_source="keyword" if keyword_category else "default",
                         sources_count=sources_count,
                         snippet=_topic_snippet(content),
                     ))
@@ -1221,6 +1320,110 @@ class ArticlePipelineService:
             # One link per paragraph: the site publisher turns each line into a <p>.
             body += f"\n{RELATED_HEADING}\n\n" + "\n\n".join(lines) + "\n"
         return self.save_draft(source.name, body)
+
+    def evaluate_semantic_engine(self) -> str:
+        """
+        Scores keyword matching against Superlinked SIE on hand-labelled topics
+        (semantic.eval_labels): brand relevance, "already covered by a draft" and
+        category. Returns accuracy/precision/recall per engine, a threshold sweep,
+        and every labelled topic with both engines' answers, so threshold or model
+        changes can be compared with numbers.
+        """
+        path = _eval_labels_path()
+        if not path or not path.is_file():
+            raise ValueError(f"No labels file found ({path or 'set semantic.eval_labels'}).")
+        if yaml is None:
+            raise RuntimeError("PyYAML is required to read the labels file.")
+        raw = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("labels") or []
+        labels = [x for x in raw if isinstance(x, dict) and str(x.get("topic", "")).strip()]
+        if not labels:
+            raise ValueError(f"{path} has no labels.")
+        sem, tiers = CONFIG["semantic"], CONFIG["suggestion"]["tiers"]
+        default = CONFIG["categories"]["default"]
+        files, texts = self._draft_corpus()
+        titles = [str(x["topic"]) for x in labels]
+
+        # Keyword engine: what the pipeline does without SIE.
+        kw_brand = [any(w.lower() in t.lower() for tier in tiers for w in tier) for t in titles]
+        kw_covered = [bool(_draft_named_for({"title": t, "filename": ""}, files)) for t in titles]
+        kw_category = [_keyword_category(t) or default for t in titles]
+
+        t0 = time.perf_counter()
+        signals = _topic_signals([{"title": t, "filename": ""} for t in titles], files, texts)
+        sie_only = _semantic_categories(titles, min_similarity=-1.0) if signals else None
+        sie_ms = round((time.perf_counter() - t0) * 1000)
+
+        def binary(pred, key):
+            gold = [bool(x.get(key)) for x in labels]
+            tp = sum(p and g for p, g in zip(pred, gold))
+            fp = sum(p and not g for p, g in zip(pred, gold))
+            fn = sum(g and not p for p, g in zip(pred, gold))
+            correct = sum(p == g for p, g in zip(pred, gold))
+            precision = tp / (tp + fp) if tp + fp else 0.0
+            recall = tp / (tp + fn) if tp + fn else 0.0
+            return {
+                "accuracy": round(correct / len(gold), 3),
+                "precision": round(precision, 3),
+                "recall": round(recall, 3),
+                "correct": correct,
+                "total": len(gold),
+            }
+
+        def category(pred):
+            gold = [str(x.get("category", "")) for x in labels]
+            correct = sum(p == g for p, g in zip(pred, gold))
+            return {"accuracy": round(correct / len(gold), 3), "correct": correct, "total": len(gold)}
+
+        tasks = [
+            {"id": "on_brand", "name": "Brand relevance", "positive": "on-brand",
+             "keyword_rule": "title contains a suggestion-tier keyword", "keyword": binary(kw_brand, "on_brand")},
+            {"id": "covered", "name": "Already covered by a draft", "positive": "covered",
+             "keyword_rule": "draft filename contains the topic slug", "keyword": binary(kw_covered, "covered")},
+            {"id": "category", "name": "Category", "positive": "",
+             "keyword_rule": "first matching keyword rule, else the default", "keyword": category(kw_category)},
+        ]
+        items = [{"topic": t, "label": {"on_brand": bool(x.get("on_brand")), "covered": bool(x.get("covered")),
+                                        "category": str(x.get("category", ""))},
+                  "keyword": {"on_brand": b, "covered": c, "category": k}}
+                 for t, x, b, c, k in zip(titles, labels, kw_brand, kw_covered, kw_category)]
+
+        if signals:
+            rel = [r for r, _, _ in signals]
+            cov = [sc for _, _, sc in signals]
+            sie_brand = [r >= sem["min_relevance"] for r in rel]
+            sie_covered = [sc >= sem["covered_threshold"] for sc in cov]
+            floor = sem["category_min_similarity"]
+            sem_cat = _semantic_categories(titles)
+            off_brand = sem["off_brand_category"]
+            sem_cat = [(off_brand or c) if not b else c for c, b in zip(sem_cat, sie_brand)]
+            combined = [k or c or default for k, c in zip([_keyword_category(t) for t in titles], sem_cat)]
+            sie_first = [c or k or default for k, c in zip([_keyword_category(t) for t in titles], sem_cat)]
+
+            def sweep(values, scores, key):
+                return [{"value": v, **binary([sc >= v for sc in scores], key)} for v in values]
+
+            tasks[0].update(sie=binary(sie_brand, "on_brand"), threshold={"name": "min_relevance", "value": sem["min_relevance"]},
+                            sweep=sweep([0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45], rel, "on_brand"))
+            tasks[1].update(sie=binary(sie_covered, "covered"), threshold={"name": "covered_threshold", "value": sem["covered_threshold"]},
+                            sweep=sweep([0.6, 0.65, 0.7, 0.75, 0.8, 0.85], cov, "covered"))
+            tasks[2].update(sie=category(combined), threshold={"name": "category_min_similarity", "value": floor},
+                            variants=[{"name": "Keyword rules, then SIE (used)", **category(combined)},
+                                      {"name": "SIE first, then keyword rules", **category(sie_first)},
+                                      {"name": "SIE only", **category(sie_only)}])
+            for item, r, sc, d, b, c, cat in zip(items, rel, cov, [d for _, d, _ in signals], sie_brand, sie_covered, combined):
+                item["sie"] = {"on_brand": b, "covered": c, "category": cat,
+                               "relevance": r, "covered_score": sc, "closest_draft": d}
+        return json.dumps({
+            "labels_file": str(path),
+            "labelled": len(labels),
+            "drafts": len(files),
+            "engine": f"sie:{SIE_MODEL}" if signals else "keyword only",
+            "sie_available": bool(signals),
+            "sie_ms": sie_ms if signals else 0,
+            "message": "" if signals else "Superlinked SIE is not reachable: only keyword results are shown.",
+            "tasks": tasks,
+            "items": items,
+        })
 
     def push_to_github(self, filename: str) -> str:
         """
