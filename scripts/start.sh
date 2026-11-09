@@ -9,6 +9,11 @@ LOG="$ROOT/logs/gateway.log"
 WITH_UI=1; [ "${1:-}" = "--no-ui" ] && WITH_UI=0
 mkdir -p "$ROOT/logs"
 
+# Callers follow the gateway's ports, so GRAFT_PORT / GRAFT_VISION_PORT move everything together.
+export GRAFT_HOST="${GRAFT_HOST:-ws://localhost:${GRAFT_PORT:-8080}/ws}"
+export VITE_GRAFT_HOST="${VITE_GRAFT_HOST:-$GRAFT_HOST}"
+export VITE_GRAFT_MCP_URL="${VITE_GRAFT_MCP_URL:-http://localhost:${GRAFT_VISION_PORT:-8081}/mcp}"
+
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing prerequisite: $1 ($2)"; exit 1; }; }
 need python3 "https://www.python.org/downloads/"
 need node "https://nodejs.org/"

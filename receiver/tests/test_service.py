@@ -367,7 +367,7 @@ def test_insert_related_links_rejects_bad_input(service, monkeypatch, tmp_path):
     _posts_file(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="No published post"):
         service.insert_related_links(DRAFT, "not-a-post")
-    with pytest.raises(ValueError, match="exact draft filename"):
+    with pytest.raises(ValueError, match="exact file name"):
         service.insert_related_links("assagao", "goa-villa-guide")
 
 
@@ -382,3 +382,44 @@ def test_publisher_slug_matches_site_rule():
     from article_receiver.service import _is_published_copy
     assert _is_published_copy("Tambdi Surla Temple Goa (2026): The Honest Guide", "tambdi-surla-temple-goa-guide")
     assert not _is_published_copy("Goa (2026): Spiritual Tourism", "goa-nightlife-guide")  # "goa" is too generic
+
+
+def test_rewriting_a_topic_keeps_the_edited_draft(service):
+    first = json.loads(service.write_article("Quiet beaches"))
+    service.save_draft(first["filename"], "MY HAND EDITS")
+    second = json.loads(service.write_article("Quiet beaches"))
+    assert second["filename"] != first["filename"]
+    assert json.loads(service.get_draft(first["filename"]))["content"] == "MY HAND EDITS"
+
+
+def test_non_latin_topics_get_distinct_filenames(service):
+    a = json.loads(service.write_article("गोवा समुद्र तट"))["filename"]
+    b = json.loads(service.write_article("गोवा भोजन"))["filename"]
+    assert a != b
+    assert not a.endswith("_.md") and not b.endswith("_.md")
+
+
+def test_banned_opener_found_after_front_matter(service):
+    service.save_draft("fm.md", "---\ntitle: X\n---\nLooking for the best beach in Goa?\n## A\n")
+    audit = json.loads(service.run_style_check("fm.md"))
+    assert "No banned generic opener" not in audit["passed_checks"]
+
+
+def test_ambiguous_partial_draft_name_is_rejected(service):
+    service.save_draft("2026-02-01_beach-one.md", "# One\n")
+    service.save_draft("2026-02-02_beach-two.md", "# Two\n")
+    with pytest.raises(ValueError, match="ambiguous"):
+        service.get_draft("beach")
+    assert json.loads(service.get_draft("beach-two"))["filename"] == "2026-02-02_beach-two.md"
+
+
+def test_empty_topic_sources_is_rejected(service):
+    with pytest.raises(ValueError):
+        service.get_topic_sources("  ")
+
+
+def test_fallback_topic_title_drops_any_date_prefix(service, tmp_path):
+    from article_receiver import service as mod
+    (mod.REVIEW_DIR / "2027-01-05_quiet-beaches.md").write_text("- [x] [y](z)\n")
+    titles = [t["title"] for t in json.loads(service.list_pending_topics())]
+    assert "Quiet Beaches" in titles
