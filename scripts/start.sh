@@ -21,6 +21,37 @@ need npm "https://nodejs.org/"
 
 bash "$ROOT/scripts/stop.sh" >/dev/null 2>&1
 
+# Optional Superlinked SIE (semantic search, topic relevance, related reads).
+# An explicit SIE_URL wins; otherwise a local sie-server is started if one is installed.
+# Skip it with SIE=off. Without SIE every feature falls back to keyword matching.
+if [ -z "${SIE_URL:-}" ] && [ "${SIE:-auto}" != "off" ]; then
+  SIE_PORT="${SIE_PORT:-8090}"
+  SIE_BIN="${SIE_BIN:-}"
+  [ -z "$SIE_BIN" ] && [ -x "$HOME/.sie-venv/bin/sie-server" ] && SIE_BIN="$HOME/.sie-venv/bin/sie-server"
+  [ -z "$SIE_BIN" ] && SIE_BIN="$(command -v sie-server || true)"
+  if curl -s "http://localhost:$SIE_PORT/readyz" 2>/dev/null | grep -qi ok; then
+    echo "==> Using the Superlinked SIE server already running on port $SIE_PORT"
+    export SIE_URL="http://localhost:$SIE_PORT"
+  elif [ -n "$SIE_BIN" ]; then
+    echo "==> Starting Superlinked SIE on port $SIE_PORT (log: $ROOT/logs/sie.log)"
+    set -m
+    nohup "$SIE_BIN" serve --port "$SIE_PORT" > "$ROOT/logs/sie.log" 2>&1 &
+    echo $! > "$ROOT/logs/sie.pid"
+    set +m
+    for i in $(seq 1 90); do
+      curl -s "http://localhost:$SIE_PORT/readyz" 2>/dev/null | grep -qi ok && break
+      sleep 1
+    done
+    if curl -s "http://localhost:$SIE_PORT/readyz" 2>/dev/null | grep -qi ok; then
+      export SIE_URL="http://localhost:$SIE_PORT"
+    else
+      echo "!! SIE did not start (see logs/sie.log); continuing with keyword matching"
+    fi
+  else
+    echo "==> Superlinked SIE not installed; using keyword matching (see README: semantic search)"
+  fi
+fi
+
 echo "==> Starting Graftcode gateway (log: $LOG)"
 set -m
 nohup bash "$ROOT/scripts/run_gateway.sh" > "$LOG" 2>&1 &
@@ -62,6 +93,11 @@ if [ "$WITH_UI" = "1" ]; then
   set +m
   sleep 4
   echo "Dashboard:      http://localhost:5173"
+fi
+if [ -n "${SIE_URL:-}" ]; then
+  # Warm the MCP side too, so the first suggestion in a demo is not the slow one.
+  GRAFT_VISION_PORT="${GRAFT_VISION_PORT:-8081}" bash "$ROOT/scripts/mcp-check.sh" suggest_next_article >/dev/null 2>&1 &
+  echo "Superlinked SIE: $SIE_URL"
 fi
 echo "Graft Vision:   http://localhost:${GRAFT_VISION_PORT:-8081}"
 echo "Logs:           $ROOT/logs/"

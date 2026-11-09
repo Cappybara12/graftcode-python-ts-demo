@@ -423,3 +423,28 @@ def test_fallback_topic_title_drops_any_date_prefix(service, tmp_path):
     (mod.REVIEW_DIR / "2027-01-05_quiet-beaches.md").write_text("- [x] [y](z)\n")
     titles = [t["title"] for t in json.loads(service.list_pending_topics())]
     assert "Quiet Beaches" in titles
+
+
+def test_embeddings_survive_a_restart_with_a_disk_cache(service, monkeypatch, tmp_path):
+    from article_receiver import service as svc_mod
+    cache = tmp_path / "cache" / "sie.json"
+    calls = []
+
+    def fake(texts):
+        calls.append(len(texts))
+        return [[1.0, float(i)] for i in range(len(texts))]
+
+    monkeypatch.setattr(svc_mod, "SIE_URL", "http://sie")
+    monkeypatch.setattr(svc_mod, "SIE_CACHE_FILE", str(cache))
+    monkeypatch.setattr(svc_mod, "_embed_with_sie", fake)
+    monkeypatch.setattr(svc_mod, "_EMBED_CACHE", {})
+    monkeypatch.setattr(svc_mod, "_disk_cache_loaded", False)
+    service.find_similar_articles("cafe", 1)
+    assert cache.is_file() and calls
+
+    # A new process: empty memory cache, same file.
+    monkeypatch.setattr(svc_mod, "_EMBED_CACHE", {})
+    monkeypatch.setattr(svc_mod, "_disk_cache_loaded", False)
+    calls.clear()
+    service.find_similar_articles("cafe", 1)
+    assert calls == []  # everything came from disk

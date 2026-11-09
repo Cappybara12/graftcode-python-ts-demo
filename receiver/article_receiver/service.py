@@ -350,18 +350,48 @@ def _embed_with_sie(texts: list) -> list:
     return [[float(v) for v in r["dense"]] for r in results]
 
 
-# Embeddings keyed by (model, sha1 of the text): a draft, topic or query is embedded once,
-# and an edited draft is re-embedded because its text changed.
+# Embeddings keyed by "model|sha1 of the text": a draft, topic or query is embedded once,
+# and an edited draft is re-embedded because its text changed. With SIE_CACHE_FILE set
+# (scripts/run_gateway.sh sets it), the cache is kept on disk and survives restarts.
 _EMBED_CACHE: dict = {}
+SIE_CACHE_FILE = os.environ.get("SIE_CACHE_FILE", "")
+_disk_cache_loaded = False
+
+
+def _read_disk_cache() -> dict:
+    try:
+        data = json.loads(Path(SIE_CACHE_FILE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_disk_cache(new: dict) -> None:
+    """Merge new vectors into the cache file (other gateway processes share it)."""
+    try:
+        path = Path(SIE_CACHE_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        merged = {**_read_disk_cache(), **{k: [round(x, 6) for x in v] for k, v in new.items()}}
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(merged), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"[sie] could not write {SIE_CACHE_FILE}: {exc}", file=sys.stderr, flush=True)
 
 
 def _embed_cached(texts: list) -> list:
-    keys = [(SIE_MODEL, hashlib.sha1(t.encode("utf-8")).hexdigest()) for t in texts]
+    global _disk_cache_loaded
+    if SIE_CACHE_FILE and not _disk_cache_loaded:
+        _EMBED_CACHE.update({k: v for k, v in _read_disk_cache().items() if k not in _EMBED_CACHE})
+        _disk_cache_loaded = True
+    keys = [f"{SIE_MODEL}|{hashlib.sha1(t.encode('utf-8')).hexdigest()}" for t in texts]
     missing = list(dict.fromkeys(k for k in keys if k not in _EMBED_CACHE))
     if missing:
         text_of = dict(zip(keys, texts))
-        for k, v in zip(missing, _embed_with_sie([text_of[k] for k in missing])):
-            _EMBED_CACHE[k] = v
+        new = dict(zip(missing, _embed_with_sie([text_of[k] for k in missing])))
+        _EMBED_CACHE.update(new)
+        if SIE_CACHE_FILE:
+            _save_disk_cache(new)
     return [_EMBED_CACHE[k] for k in keys]
 
 

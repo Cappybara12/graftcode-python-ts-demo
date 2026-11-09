@@ -63,6 +63,10 @@ if [ -z "${WAYZYY_SAMPLE_DIR:-}" ]; then
     export WAYZYY_SAMPLE_DIR="$ROOT/receiver/sample_data"
   fi
 fi
+# Optional Superlinked SIE embeddings are cached on disk so restarts stay fast.
+export SIE_CACHE_FILE="${SIE_CACHE_FILE:-$ROOT/.cache/sie-embeddings.json}"
+[ -n "${SIE_URL:-}" ] && echo "Using Superlinked SIE at $SIE_URL"
+
 cd "$ROOT/receiver"
 echo "Starting Graftcode Gateway hosting ArticlePipelineService..."
 exec "$GG" ./article_receiver/service.py \
