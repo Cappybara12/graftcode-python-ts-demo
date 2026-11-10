@@ -18,12 +18,14 @@ import {
   Scan,
   LightbulbIcon,
   Search,
+  FlaskConical,
 } from 'lucide-react'
 import confetti from 'canvas-confetti'
 import { callGraft, mcpListTools } from './graft'
 import Architecture from './Architecture'
 import SemanticSearch from './SemanticSearch'
 import RelatedReads from './RelatedReads'
+import Evaluation from './Evaluation'
 
 interface Topic {
   id: string
@@ -36,6 +38,7 @@ interface Topic {
   relevance: number | null
   on_brand: boolean | null
   covered_by: string
+  category_source: 'keyword' | 'sie' | 'default'
 }
 
 interface Draft {
@@ -64,13 +67,14 @@ interface RpcLog {
   status: 'ok' | 'err'
 }
 
-type Tab = 'overview' | 'queue' | 'writer' | 'search' | 'auditor' | 'publisher' | 'architecture'
+type Tab = 'overview' | 'queue' | 'writer' | 'search' | 'evaluation' | 'auditor' | 'publisher' | 'architecture'
 
 const SIDEBAR_NAV = [
   { id: 'overview',      label: 'Dashboard',       icon: LayoutDashboard },
   { id: 'queue',         label: 'Topic Queue',      icon: Flame },
   { id: 'writer',        label: 'Draft Studio',     icon: BookOpen },
   { id: 'search',        label: 'Semantic Search',  icon: Search },
+  { id: 'evaluation',    label: 'Evaluation',       icon: FlaskConical },
   { id: 'auditor',       label: 'Style Auditor',    icon: ShieldCheck },
   { id: 'publisher',     label: 'GitHub Staging',   icon: GitPullRequest },
   { id: 'architecture',  label: 'Architecture',     icon: Code2 },
@@ -550,7 +554,9 @@ export default function App() {
                   <div key={topic.id} className="topic-card" style={topic.on_brand === false || topic.covered_by ? { opacity: 0.6 } : undefined}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        <span className="badge badge-gray">{topic.category}</span>
+                        <span className="badge badge-gray" title={topic.category_source === 'sie' ? 'Category chosen by Superlinked SIE (no keyword matched)' : undefined}>
+                          {topic.category}{topic.category_source === 'sie' ? ' · SIE' : ''}
+                        </span>
                         {topic.relevance != null && (
                           <span
                             className={`badge ${topic.on_brand ? 'badge-green' : 'badge-amber'}`}
@@ -834,6 +840,8 @@ export default function App() {
 
           {/* ══════════ ARCHITECTURE ══════════ */}
           {tab === 'search' && <SemanticSearch call={callGraftRpc} />}
+
+          {tab === 'evaluation' && <Evaluation call={callGraftRpc} />}
 
           {tab === 'architecture' && <Architecture statusLabel={status?.status} />}
 

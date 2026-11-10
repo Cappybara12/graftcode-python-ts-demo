@@ -92,7 +92,9 @@ if [ "$WITH_UI" = "1" ]; then
   (cd "$ROOT/ui" && nohup ./node_modules/.bin/vite > "$ROOT/logs/ui.log" 2>&1 & echo $! > "$ROOT/logs/ui.pid")
   set +m
   sleep 4
-  echo "Dashboard:      http://localhost:5173"
+  # Vite moves to the next free port when 5173 is taken, so report the one it chose.
+  UI_URL="$(grep -oE 'http://localhost:[0-9]+' "$ROOT/logs/ui.log" | head -1)"
+  echo "Dashboard:      ${UI_URL:-http://localhost:5173}"
 fi
 if [ -n "${SIE_URL:-}" ]; then
   # Warm the MCP side too, so the first suggestion in a demo is not the slow one.

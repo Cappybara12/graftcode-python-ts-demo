@@ -187,46 +187,35 @@ live in the separate pipeline project you attach with `WAYZYY_WRITER_DIR`.
 
 ## Optional: semantic search with Superlinked SIE
 
-`find_similar_articles(query, limit)` returns the existing drafts closest in meaning to a topic.
-By default it uses keyword overlap and needs nothing extra. To use embeddings, run a local
-[Superlinked SIE](https://github.com/superlinked/sie) server (needs Python 3.12) and point the
-receiver at it:
+With a [Superlinked SIE](https://github.com/superlinked/sie) server (open source, self-hosted, no API
+key) the pipeline compares texts by meaning instead of shared words. Install it once (needs
+Python 3.12):
 
 ```bash
-pip install "sie-server[local]" && sie-server serve --port 8090
-SIE_URL=http://localhost:8090 bash scripts/start.sh
+python3.12 -m venv ~/.sie-venv && ~/.sie-venv/bin/pip install "sie-server[local]"
 ```
 
-`SIE_MODEL` picks the embedding model (default `sentence-transformers/all-MiniLM-L6-v2`). If SIE is
-unreachable the method falls back to keywords, and each result says which `engine` produced it.
-Like every public method, it is also exposed through the Graft and MCP.
+`scripts/start.sh` then starts it on port 8090 (or reuses one already running there) and stops it
+with `scripts/stop.sh`. Set `SIE_URL` to use another server, or `SIE=off` to skip it. Without SIE
+every feature below falls back to keyword matching, and the gateway log says why. Embeddings are
+cached in `.cache/sie-embeddings.json`, so only new or edited texts are embedded after a restart.
+`SIE_MODEL` picks the model (default `sentence-transformers/all-MiniLM-L6-v2`).
 
-The dashboard's **Semantic Search** tab calls `compare_search_engines(query, limit)` to show keyword
-and SIE results side by side, with the time each took. Draft embeddings are cached, so after the
-first search only the query is embedded. The very first query after starting SIE downloads the
-model and can take about a minute, so run one before a demo.
+What SIE adds (settings live in the config's `semantic:` section):
 
-With SIE running, the pipeline also uses it to pick topics (thresholds in the config's `semantic:` section):
+| Where | What it does |
+|---|---|
+| **Semantic Search** tab | `compare_search_engines(query, limit)` shows keyword and SIE results side by side, with timings; `find_similar_articles(query, limit)` returns the closest drafts. |
+| **Suggest Best** | `suggest_next_article` skips **off-brand** topics (similarity to `brand_profile` below `min_relevance`) and topics an existing draft **already covers** (similarity to a draft's title of at least `covered_threshold`), and adds `relevance × relevance_weight` to the score. |
+| **Topic Queue** | `list_pending_topics` adds `relevance`, `on_brand`, `covered_by` and a **category**: keyword rules first, then the closest category `description` (at least `category_min_similarity`); off-brand topics go to `off_brand_category`. `category_source` says which decided. |
+| **Draft Studio → Related reads** | `suggest_related_links(filename, limit)` finds **published posts** (the site's `src/lib/blogPosts.ts`, located through `site_repo_path` in the writer's config or `site_posts_file`) to link, with their real `/blog/<slug>` URLs, skips the draft's own published copy, and flags near-duplicate titles. `insert_related_links(filename, slugs)` writes them as a `## Related reads` section. Only published posts are linked, so a live article never gets a 404 link. |
+| **Evaluation** tab | `evaluate_semantic_engine()` scores keyword matching against SIE on hand-labelled topics (`config/eval/wayzyy-labels.yaml`) for brand relevance, coverage and category, with a threshold sweep and every topic's answers. |
 
-- `suggest_next_article` skips **off-brand** topics (similarity to `brand_profile` below
-  `min_relevance`) and topics an existing draft **already covers** (similarity to a draft's title of
-  at least `covered_threshold`), and adds `relevance × relevance_weight` to each topic's score. The
-  rationale says how many topics were skipped.
-- `list_pending_topics` adds `relevance`, `on_brand` and `covered_by` to each topic, and the Topic
-  Queue shows them as badges with a "Sort by brand relevance" toggle.
-
-- `suggest_related_links(filename, limit)` finds **published posts** (read from the site's
-  `src/lib/blogPosts.ts`, using `site_repo_path` from the writer's config or `site_posts_file`) that a
-  draft should link to, with their real `/blog/<slug>` URLs. It skips the draft's own published copy,
-  off-brand drafts and posts below `link_min_similarity`, and flags titles at least
-  `duplicate_threshold` similar as possible duplicates. Draft Studio shows these under
-  **Related reads**, and `insert_related_links(filename, slugs)` writes the chosen ones as a
-  `## Related reads` section (one link per line, as the site publisher expects), replacing any
-  existing section. Only published posts are linked, so the live article never gets a 404 link.
-
+On the 53 labelled Wayzyy topics: brand relevance 60% (keyword) vs 91% (SIE), category 76% vs 87%,
+and "already covered" 91% for both (SIE finds more of them, keyword is never wrong when it fires).
 Coverage compares topics with draft titles rather than full text: a short topic is loosely similar to
 every long article about the same place, so whole-text scores marked unrelated topics as covered.
-Without SIE these methods behave exactly as before, and the gateway log says why SIE was skipped.
+Re-run the Evaluation tab after changing a threshold or model.
 
 ## Attach the real pipeline (optional)
 
