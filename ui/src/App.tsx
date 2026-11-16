@@ -290,7 +290,7 @@ export default function App() {
 
         <div style={{ marginTop: 'auto', padding: '16px 12px' }}>
           <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', lineHeight: 1.5 }}>
-            Graftcode Gateway v1.4.10<br />
+            Graftcode Gateway v1.5.0 (Stable)<br />
             Python Receiver ↔ TypeScript
           </div>
         </div>
@@ -436,7 +436,7 @@ export default function App() {
                   </div>
                   <div className="divider" style={{ marginBottom: 14 }} />
                   {[
-                    { label: 'Receiver Host', value: 'Graftcode Gateway v1.4.10', ok: true },
+                    { label: 'Receiver Host', value: 'Graftcode Gateway v1.5.0 (Stable)', ok: true },
                     { label: 'Transport',     value: 'Hypertube Binary / WebSocket', ok: true },
                     { label: 'Primary LLM',   value: status?.providers.primary_llm ?? 'loading…', ok: !!status },
                     { label: 'Media Engine',  value: status?.providers.media_engine ?? 'loading…', ok: !!status },
